@@ -1,0 +1,34 @@
+Attention à d'un ancien
+Il y a un détail important ici.
+Ton tokenizer actuel :
+words = re.findall(
+    r"[a-zA-Zàâäéèêëîôöùûüçÿœæ'-]+",
+    clean_text
+)
+va produire :
+d'un
+ancien
+C'est bien.
+Mais le linker ne doit pas traiter uniquement :
+"un"
+Il doit reconnaître que dans :
+d'un
+le noyau phonétique final est celui de un.
+Donc je veux qu'on ajoute au linker une normalisation des mots avec apostrophe.
+Dans link_words(), juste après :
+current = words[i].lower().strip(".,!?;:«»\"'()[]")
+ajoute :
+# Pour les élisions : d'un, l'ancien, qu'il, n'est...
+# Le segment après l'apostrophe porte le mot lexical pertinent
+# pour la liaison.
+current_for_liaison = current.split("'")[-1]
+Puis :
+consonant = self.LIAISON_MAP.get(current_for_liaison)
+au lieu de :
+consonant = self.LIAISON_MAP.get(current)
+Ainsi :
+d'un ancien
+   ↓
+un + ancien
+   ↓
+œ̃‿n
