@@ -1,7 +1,8 @@
 """
 Module de Phonétisation IPA (International Phonetic Alphabet)
 ════════════════════════════════════════════════════════════════════════════════
-Convertit texte français en symboles phonétiques IPA complets.
+Convertit texte français en symboles phonétiques IPA complets, intégrant
+la gestion robuste des liaisons et des cas particuliers ($H$ aspiré).
 
 Références:
 - Académie Française (Dictionnaire d'Orthoépie)
@@ -31,544 +32,6 @@ from functools import lru_cache
 import json
 
 logger = logging.getLogger(__name__)
-
-
-class FrenchPhoneticLinker:
-    """
-    Gère les phénomènes phonétiques inter-mots du français :
-    - liaisons obligatoires courantes
-    - enchaînements consonantiques
-    - formes inversées : dit-elle, va-t-il, a-t-il...
-    - élisions simples
-    - prise en compte du h aspiré
-
-    Le texte original n'est jamais modifié.
-    Le linker ne transforme que la représentation IPA destinée au TTS.
-    """
-
-    # Voyelles orthographiques pouvant déclencher une liaison.
-    # Le 'h' est volontairement absent : un h aspiré ne déclenche pas
-    # automatiquement de liaison.
-    VOWELS = "aàâäeéèêëiîïoôöuùûüyÿœæ"
-
-    # Mots dont la consonne finale est régulièrement réalisée en liaison.
-    # On commence volontairement par les cas sûrs/fréquents.
-    LIAISON_MAP_EXTENDED = {
-    # /z/ - Pluriels et démonstratifs
-    "les": "z",
-    "des": "z",
-    "ces": "z",
-    "mes": "z",
-    "tes": "z",
-    "ses": "z",
-    "nos": "z",
-    "vos": "z",
-    "leurs": "z",
-    "aux": "z",
-    "tous": "z",           # Tous les hommes
-    "quelques": "z",       # Quelques amis
-    "autres": "z",         # Autres informations
-    "plusieurs": "z",      # Plusieurs enfants
-    "divers": "z",         # Divers événements
-    "certains": "z",       # Certains enfants
-    
-    # /n/ - Articles et quantificateurs
-    "un": "n",
-    "aucun": "n",
-    "aucune": "n",
-    "mon": "n",
-    "ton": "n",
-    "son": "n",
-    "bon": "n",
-    "bien": "n",           # Bien être
-    "en": "n",             # En avant
-    "on": "n",             # On arrive
-    "rien": "n",           # Rien à faire
-    "ancien": "n",         # Ancien ami
-    "ancienne": "n",       # Ancienne amie
-    "certain": "n",        # Certain ami
-    "certaine": "n",       # Certaine amie
-    "plein": "n",          # Plein air
-    "divin": "n",          # Divin ami
-    
-    # /t/ - Adjectifs et adverbes
-    "tout": "t",
-    "petit": "t",
-    "grand": "t",
-    "comment": "t",
-    "est": "t",            # Il est arrivé
-    "très": "t",           # Très efficace
-    "compétent": "t",      # Compétent homme
-    "important": "t",      # Important événement
-    "différent": "t",      # Différent appel
-    "courant": "t",        # Courant juillet
-    "durant": "t",         # Durant août
-    "pendant": "t",        # Pendant octobre
-    "instant": "t",        # Instant après
-    "apparent": "t",       # Apparent ami
-    "emplacement": "t",    # Emplacement autorisé
-    "équipement": "t",     # Équipement adapté
-    "penchant": "t",       # Penchant affectif
-    
-    # /ʁ/ - Adjectifs avec -ier/-ère/-eur/-re
-    "premier": "ʁ",        # ✓ Déjà présent
-    "dernière": "ʁ",       # Dernière heure
-    "derniere": "ʁ",       # Variante non accentuée
-    "meilleur": "ʁ",       # Meilleur ami
-    "meilleure": "ʁ",      # Meilleure amie
-    "antérieur": "ʁ",      # Antérieur événement
-    "extérieur": "ʁ",      # Extérieur apparence
-    "intérieur": "ʁ",      # Intérieur aménagement
-    "supérieur": "ʁ",      # Supérieur ancien
-    "inférieur": "ʁ",      # Inférieur alternative
-    
-    # /p/ - Adverbes de quantité
-    "beaucoup": "p",       # Beaucoup avaient
-    "trop": "p",           # Trop important
-    
-    # /d/ - Adjectifs commençant par gr- ou f-
-    "grand": "d",          # Grand ami (déjà présent en /t/)
-    "fond": "d",           # Fond argent
-    
-    # /s/ - Cas particuliers
-    "moins": "s",          # Moins intense
-    "fois": "z",           # Fois an (note: prononcé /z/ en liaison)
-    
-    # /g/ - Très rare
-    "sang": "g",           # Sang amer (littéraire)
-    
-    # /v/ - Neuf seulement (variante vieille langue)
-    # "neuf": "v",         # Neuf années (ancien, désuet)
-}
-
-H_ASPIRE_EXTENDED = {
-    # ✓ ORIGINAUX
-    "héros",
-    "haricot",
-    "haricots",
-    "hache",
-    "haine",
-    "hauteur",
-    "honte",
-    "hibou",
-    "hiver",
-    "hors",
-    "huit",
-    "huile",
-    "humain",
-    "humour",
-    "hurler",
-    "hâter",
-    "harceler",
-    "harasser",
-    "heurter",
-    "hocher",
-    
-    # Noms courants
-    "haut",
-    "hautain",
-    "hasard",
-    "hardi",
-    "hareng",
-    "harmonie",
-    "harnais",
-    "harpie",
-    "hasardeux",
-    "hauban",
-    "haubannage",
-    "haubert",
-    "hausse",
-    "haussement",
-    "havane",
-    "havre",
-    "hébraïque",
-    "hébreu",
-    "hécatombe",
-    "hématite",
-    "hémicycle",
-    "hémophile",
-    "hémorragie",
-    "hémorroïde",
-    "henne",
-    "héraldique",
-    "héraut",
-    "herbe", 
-    "herborisateur",
-    "herbicide",
-    "hercule", 
-    "hercynien",
-    "hère",
-    "hérédité",
-    "hérés",
-    "hérésiarque",
-    "hérésie",
-    "hérétique",
-    "hérétiquement",
-    "héretondelle",
-    "héreuille",
-    "herge",
-    "hérissement",
-    "hérisser",
-    "hérisson",
-    "hérite",
-    "hériter",
-    "héritière",
-    "héritière",
-    "hermandad",
-    "hermitage",
-    "hermite", 
-    "hermitique",
-    "hermès",
-    "hermétique", 
-    "hermétiquement",
-    "hermétisme",
-    "hermione",
-    "hermodactyle",
-    "hermondactor",
-    "hermopolite",
-    "hermosa",
-    "hermule",
-    "hernade",
-    "hernaire",
-    "herniaire",
-    "hernie",   
-    "hernié",
-    "hernieux",
-    "héro",  
-    "héroïde",
-    "héroïquement",
-    "héroïsme",
-    "héron",
-    "héronière",
-    "héronniaire",
-    "héros",     
-    "herpès",    
-    "herpestidé",
-    "herpétologie",
-    "herpétologue",
-    "herppe",
-    "herr",
-    "herse",
-    "herseau",
-    "hersiere",
-    "hersécher",
-    "hersher",
-    "herstaille",
-    "hertfordshire",
-    "héruque",
-    "hervelette",
-    "hervelle",
-    "hérvens",
-    "heryage",
-    "hésitamment",
-    "hésitance",
-    "hésitant",
-    "hésitation", 
-    "hésiter",     
-    "hétaire",
-    "hétérocène",
-    "hétérodoxe",
-    "hétérododoxie",
-    "hétérogamie",
-    "hétérogène",
-    "hétérogénéité",
-    "hétérographe",
-    "hétérographie",
-    "hétérométrie",
-    "hétéromorphe",
-    "hétéromorphie",
-    "hétéronyme",
-    "hétéronymie",
-    "hétéronyque",
-    "hétéropathe",
-    "hétéropathie",
-    "hétérophage",
-    "hétérophagie",
-    "hétérophile",
-    "hétérophilité",
-    "hétérophonie",
-    "hétérophoniquement",
-    "hétérophoniste",
-    "hétérophylle",
-    "hétérophyllé",
-    "hétérophyllie",
-    "hétéroplasie",
-    "hétéroplaste",
-    "hétéropneuste",
-    "hétéropode",
-}
-
-def _extract_core_word(self, word: str) -> str:
-        """
-        Extrait le mot lexical core pour liaison après élisions.
-        
-        Exemples :
-            "d'un" → "un"
-            "l'ancien" → "ancien"
-            "s'il" → "il"
-            "c'est-à-dire" → "est"
-        """
-        # Élision (apostrophe)
-        if "'" in word:
-            word = word.split("'")[-1]
-        
-        # Trait d'union (rare mais possible)
-        if "-" in word:
-            word = word.split("-")[0]
-        
-        return word.strip()
-    
-    def _handle_h_aspire_improved(self, word: str) -> bool:
-        """
-        Vérification améliorée pour h aspiré.
-        
-        Retourne True si le mot commence par h aspiré.
-        """
-        word = word.lower().strip()
-        
-        if not word.startswith("h"):
-            return False
-        
-        # Vérifier dans la liste étendue
-        return word in H_ASPIRE_EXTENDED or word in self.H_ASPIRE
-    
-    def suggest_liaison_for_word(self, word: str) -> Optional[str]:
-        """
-        Suggère la consonne de liaison pour un mot donné.
-        
-        Utile pour tests et debug.
-        
-        Exemple :
-            "tous" → "z"
-            "bien" → "n"
-            "est" → "t"
-            "inconnu" → None
-        """
-        word_normalized = self._extract_core_word(word.lower())
-        return LIAISON_MAP_EXTENDED.get(word_normalized)
-
-
-    def link_words(
-        self,
-        words: list[str],
-        analyses: list[str],
-    ) -> list[str]:
-        """
-        Applique les liaisons/enchaînements aux IPA unitaires.
-
-        Exemple :
-            ["comment", "allez", "vous"]
-            ->
-            ["kɔmɑ̃‿t", "ale", "vu"]
-
-            ["les", "États", "Unis"]
-            ->
-            ["le‿z", "eta‿z", "yni"]
-
-            ["d'un", "ancien"]
-            ->
-            ["dœ̃‿n", "ɑ̃sjɛ̃"]
-        """
-        if not words or not analyses or len(words) != len(analyses):
-            return analyses
-
-        linked = list(analyses)
-
-        for i in range(len(words) - 1):
-            current = words[i].lower().strip(".,!?;:«»\"'()[]")
-
-            # Pour les élisions : d'un, l'ancien, qu'il, n'est...
-            # Le segment après l'apostrophe porte le mot lexical pertinent pour la liaison.
-            current_for_liaison = current.split("'")[-1]
-
-            next_word = words[i + 1].lower().strip(".,!?;:«»\"'()[]")
-
-            if not current or not next_word:
-                continue
-
-            # ----------------------------------------------------------
-            # 1. Formes avec trait d'union :
-            #    dit-elle, va-t-il, a-t-il, parle-t-elle...
-            # ----------------------------------------------------------
-            if "-" in words[i]:
-                linked[i] = self._handle_hyphenated(
-                    words[i],
-                    linked[i],
-                    next_word
-                )
-                continue
-
-            # ----------------------------------------------------------
-            # 2. Pas de liaison après les mots interdits.
-            # ----------------------------------------------------------
-            if current in self.FORBIDDEN_LIAISON_AFTER:
-                continue
-
-            # ----------------------------------------------------------
-            # 3. Le mot suivant doit commencer par un son vocalique.
-            #    On utilise l'orthographe pour la première approximation,
-            #    avec exclusion du h aspiré.
-            # ----------------------------------------------------------
-            if not self._starts_with_vowel(next_word):
-                continue
-
-            # ----------------------------------------------------------
-            # 4. Liaison lexicale connue.
-            # ----------------------------------------------------------
-            consonant = self.LIAISON_MAP.get(current_for_liaison)
-            if consonant:
-                linked[i] = self._append_linked_consonant(
-                    linked[i],
-                    consonant
-                )
-
-        # --------------------------------------------------------------
-        # 5. Cas particulier : "un ancien", "un ami", etc.
-        #
-        # Le dictionnaire IPA de "un" peut déjà contenir /n/ dans
-        # sa forme isolée. On s'assure ici que la liaison est marquée.
-        # --------------------------------------------------------------
-        return linked
-
-    def _starts_with_vowel(self, word: str) -> bool:
-        """Retourne True si le mot suivant commence par un son vocalique."""
-        word = word.lower().strip()
-
-        if not word:
-            return False
-
-        # h aspiré = disjonction
-        if word in self.H_ASPIRE:
-            return False
-
-        # h muet : la liaison reste possible
-        if word.startswith("h"):
-            return len(word) > 1 and word[1] in self.VOWELS
-
-        return word[0] in self.VOWELS
-
-    def _append_linked_consonant(
-        self,
-        ipa: str,
-        consonant: str,
-    ) -> str:
-        """
-        Ajoute une consonne de liaison sans casser l'IPA existante.
-
-        Exemple :
-            /le/ + z -> /le‿z/
-            /kɔmɑ̃/ + t -> /kɔmɑ̃‿t/
-        """
-        if not ipa:
-            return ipa
-
-        # Ne pas ajouter deux fois la même consonne.
-        if ipa.endswith(consonant) or f"‿{consonant}" in ipa:
-            return ipa
-
-        return f"{ipa}‿{consonant}"
-
-    def _handle_hyphenated(
-        self,
-        word: str,
-        ipa: str,
-        next_word: str = "",
-    ) -> str:
-        """
-        Traite les formes pronominales avec trait d'union.
-
-        Exemples :
-            dit-elle -> di‿t ɛl
-            va-t-il   -> va‿t il
-            a-t-il    -> a‿t il
-        """
-        lower = word.lower()
-
-        # Formes avec t euphonique explicite.
-        if "-t-" in lower:
-            parts = lower.split("-t-", 1)
-            if len(parts) == 2:
-                left = self._safe_word_ipa(parts[0])
-                right = self._safe_word_ipa(parts[1])
-
-                if left and right:
-                    return f"{left}‿t {right}"
-
-        # Formes fréquentes où le t est grammaticalement ajouté.
-        if lower.startswith((
-            "dit-",
-            "va-",
-            "a-",
-            "parle-",
-            "chante-",
-            "est-",
-        )):
-            parts = lower.split("-", 1)
-
-            if len(parts) == 2:
-                left = parts[0]
-                right = parts[1]
-
-                left_ipa = self._safe_word_ipa(left)
-                right_ipa = self._safe_word_ipa(right)
-
-                if left_ipa and right_ipa:
-                    return f"{left_ipa}‿t {right_ipa}"
-
-        return ipa
-
-    def _safe_word_ipa(self, word: str) -> str:
-        """
-        Conversion minimale utilisée uniquement pour les formes
-        avec trait d'union.
-
-        On évite une dépendance circulaire vers FrenchIPAPhoneticizer.
-        """
-        simple = {
-            "dit": "di",
-            "va": "va",
-            "a": "a",
-            "parle": "paʁl",
-            "chante": "ʃɑ̃t",
-            "est": "ɛ",
-            "il": "il",
-            "elle": "ɛl",
-            "ils": "il",
-            "elles": "ɛl",
-            "on": "ɔ̃",
-            "elle": "ɛl",
-        }
-
-        return simple.get(word.lower(), "")
-
-    def _is_liaison_word(self, word: str) -> bool:
-        """Détermine si un mot peut déclencher une liaison."""
-        return word in {
-            "les", "des", "ces", "mes", "tes", "ses", "nos", "vos", "leurs",
-            "un", "bon", "tout", "petit", "grand", "les", "aux", "dans", "sans",
-            "comment", "quand", "font"
-        }
-
-    def _get_liaison_consonant(self, word: str) -> str:
-        """Associe la consonne muette finale qui reparaît lors de la liaison."""
-        mapping = {
-            "comment": "t",
-            "les": "z", "des": "z", "ces": "z", "mes": "z", "tes": "z", "ses": "z",
-            "nos": "z", "vos": "z", "leurs": "z", "aux": "z", "dans": "z", "sans": "z",
-            "un": "n", "bon": "n", "en": "n", "on": "n",
-            "tout": "t", "petit": "t", "grand": "t"
-        }
-        return mapping.get(word, "")
-
-    def _handle_hyphenated(self, word: str, ipa: str) -> str:
-        """Traite les formes inversées avec trait d'union (ex: dit-elle -> di.t‿ɛl)."""
-        if "-t-" in word or word.startswith(("dit-", "va-", "a-", "parle-", "chante-", "est-")):
-            # Remplace l'espace ou sépare proprement avec la consonne d'appui t
-            if " " in ipa:
-                parts = ipa.split()
-                if len(parts) >= 2:
-                    return f"{parts[0]}.t‿{parts[1]}"
-        return ipa
 
 
 class VoiceType(Enum):
@@ -652,40 +115,29 @@ class FrenchIPAPhoneticizer:
         logger.info(f"Phonétiseur IPA initialisé (voix: {voice_type.value})")
     
     def _initialize_dictionaries(self) -> None:
-        """Initialise les dictionnaires phonétiques."""
+        """Initialise les dictionnaires phonétiques, de liaisons et de h aspiré."""
         
         # ═════════════════════════════════════════════════════════════════
         # VOYELLES ORALES
         # ═════════════════════════════════════════════════════════════════
         self.vowels_oral = {
-            # Fermées antérieures arrondies
-            'u': 'y',       # tu, tu
+            'u': 'y',       # tu
             'eu': 'ø',      # peu, deux
-            'œu': 'œ',      # peur, cheur
-            
-            # Fermées antérieures
+            'œu': 'œ',      # peur
             'i': 'i',       # si, ici
             'y': 'i',       # psy → psi (variante)
-            
-            # Fermées postérieures
             'ou': 'u',      # vous, tout
             'oo': 'u',      # zoo
-            
-            # Moyennes antérieures
             'é': 'e',       # été, café
-            'e': 'e',       # été, été
+            'e': 'e',       # été
             'è': 'ɛ',       # mère, très
             'ê': 'ɛ',       # être, fête
             'ai': 'ɛ',      # ai, aime
             'ei': 'ɛ',      # beige, veine
-            
-            # Moyennes postérieures
             'o': 'o',       # eau, beau
             'ô': 'o',       # château, pôle
             'au': 'o',      # eau, beau
             'eau': 'o',     # eau, beau
-            
-            # Ouverte postérieure
             'a': 'a',       # chat, papa
             'â': 'a',       # pâte, âne
         }
@@ -698,7 +150,6 @@ class FrenchIPAPhoneticizer:
             'am': 'ɑ̃',      # ambiance
             'en': 'ɑ̃',      # en, lent
             'em': 'ɑ̃',      # ensemble, temple
-            
             'in': 'ɛ̃',      # in, pain, main
             'im': 'ɛ̃',      # immanent
             'yn': 'ɛ̃',      # lyn
@@ -707,13 +158,9 @@ class FrenchIPAPhoneticizer:
             'ain': 'ɛ̃',     # pain, main
             'aim': 'ɛ̃',     # faim
             'ein': 'ɛ̃',     # rein, plein
-            'eym': 'ɛ̃',     # faisant? Non, exception
-            
             'on': 'ɔ̃',      # on, son, bon
             'om': 'ɔ̃',      # homme, pomme
             'oin': 'wɛ̃',    # loin, coin, point
-            
-            'un': 'ɛ̃',      # un, brun
             'ung': 'ɛ̃',     # Jung
         }
         
@@ -721,49 +168,40 @@ class FrenchIPAPhoneticizer:
         # CONSONNES
         # ═════════════════════════════════════════════════════════════════
         self.consonants = {
-            # Occlusives
-            'p': 'p',       # pas, patte
-            'b': 'b',       # bas, batte
-            't': 't',       # tas, tasse
-            'd': 'd',       # da, dasse
-            'k': 'k',       # cat, casse
-            'c': 'k',       # chat, casse (sauf c+e/i)
-            'g': 'g',       # gaz, gasse
-            'qu': 'k',      # qui, quet
+            'p': 'p',       # pas
+            'b': 'b',       # bas
+            't': 't',       # tas
+            'd': 'd',       # da
+            'k': 'k',       # casse
+            'c': 'k',       # casse (sauf c+e/i)
+            'g': 'g',       # gaz
+            'qu': 'k',      # qui
             'q': 'k',       # Iraq
-            
-            # Fricatives
-            'f': 'f',       # feu, café
-            'v': 'v',       # veu, ève
-            's': 's',       # sou, assez (sauf entre voyelles)
+            'f': 'f',       # feu
+            'v': 'v',       # veu
+            's': 's',       # sou
             'ss': 's',      # assez
             'z': 'z',       # zèbre
             'ç': 's',       # ça, français
             'x': 'ks',      # axe, taxi
             'ex': 'ɛks',    # exemple
-            'ch': 'ʃ',      # chat, cheval
+            'ch': 'ʃ',      # chat
             'sch': 'ʃ',     # schwa
-            'j': 'ʒ',       # je, jeu
-            'ge': 'ʒ',      # George, rouge
+            'j': 'ʒ',       # je
+            'ge': 'ʒ',      # George
             'gi': 'ʒ',      # giraffe
             'h': '',        # h muet
             'w': 'w',       # wagon
-            
-            # Nasales
-            'm': 'm',       # me, maman
-            'n': 'n',       # ne, nana
+            'm': 'm',       # me
+            'n': 'n',       # ne
             'nn': 'n',      # nana
-            'gn': 'ɲ',      # gnome, oignon
-            'ni': 'ɲ',      # ni → ɲ (avant voyelle)
-            
-            # Latérales
-            'l': 'l',       # le, elle
+            'gn': 'ɲ',      # gnome
+            'ni': 'ɲ',      # ni (avant voyelle)
+            'l': 'l',       # le
             'll': 'l',      # elle
-            
-            # Approximantes
-            'r': 'ʁ',       # rat, erre
+            'r': 'ʁ',       # rat
             'rr': 'ʁ',      # erre
-            'y': 'j',       # yoga, yeux (consonne)
+            'y': 'j',       # yoga
             '\'': '',       # apostrophe
         }
         
@@ -771,21 +209,18 @@ class FrenchIPAPhoneticizer:
         # DIGRAPHES & TRIGRAPHES
         # ═════════════════════════════════════════════════════════════════
         self.digraphs = {
-            # Consonantaux
             'ch': 'ʃ',      # chat
             'ph': 'f',      # photo
-            'gh': '',       # gh muet généralement
+            'gh': '',       # gh muet
             'th': 't',      # théâtre
             'rh': 'ʁ',      # rhume
-            'qu': 'k',      # qui, que
+            'qu': 'k',      # qui
             'gn': 'ɲ',      # gnome
-            'ng': 'ŋ',      # parking (emprunt)
-            'gu': 'g',      # guerre, gui
-            
-            # Vocaliques
+            'ng': 'ŋ',      # parking
+            'gu': 'g',      # guerre
             'ai': 'ɛ',      # aime
             'au': 'o',      # eau
-            'ea': 'o',      # beau → eau
+            'ea': 'o',      # beau
             'ei': 'ɛ',      # beige
             'eu': 'ø',      # peu
             'ie': 'i',      # client
@@ -793,17 +228,96 @@ class FrenchIPAPhoneticizer:
             'ou': 'u',      # vous
             'oy': 'wa',     # royal
             'ue': 'y',      # rue
-            'ui': 'ɥi',     # lui, fruit
-            'ue': 'y',      # rue
+            'ui': 'ɥi',     # lui
             'ye': 'i',      # yeux
             'ya': 'ja',     # yoga
         }
         
         # ═════════════════════════════════════════════════════════════════
+        # LIAISONS ET H ASPIRÉ ÉTENDUS
+        # ═════════════════════════════════════════════════════════════════
+        self.LIAISON_MAP_EXTENDED = {
+            # /z/ - Pluriels et démonstratifs
+            "les": "z", "des": "z", "ces": "z", "mes": "z", "tes": "z", 
+            "ses": "z", "nos": "z", "vos": "z", "leurs": "z", "aux": "z", 
+            "tous": "z", "quelques": "z", "autres": "z", "plusieurs": "z", 
+            "divers": "z", "certains": "z",
+            
+            # /n/ - Articles et quantificateurs
+            "un": "n", "aucun": "n", "aucune": "n", "mon": "n", "ton": "n", 
+            "son": "n", "bon": "n", "bien": "n", "en": "n", "on": "n", 
+            "rien": "n", "ancien": "n", "ancienne": "n", "certain": "n", 
+            "certaine": "n", "plein": "n", "divin": "n",
+            
+            # /t/ - Adjectifs et adverbes
+            "tout": "t", "petit": "t", "grand": "t", "comment": "t", 
+            "est": "t", "très": "t", "compétent": "t", "important": "t", 
+            "différent": "t", "courant": "t", "durant": "t", "pendant": "t", 
+            "instant": "t", "apparent": "t", "emplacement": "t", 
+            "équipement": "t", "penchant": "t",
+            
+            # /ʁ/ - Adjectifs avec -ier/-ère/-eur/-re
+            "premier": "ʁ", "dernière": "ʁ", "derniere": "ʁ", "meilleur": "ʁ", 
+            "meilleure": "ʁ", "antérieur": "ʁ", "extérieur": "ʁ", 
+            "intérieur": "ʁ", "supérieur": "ʁ", "inférieur": "ʁ",
+            
+            # /p/ - Adverbes de quantité
+            "beaucoup": "p", "trop": "p",
+            
+            # /d/ - Adjectifs commençant par gr- ou f-
+            "fond": "d",
+            
+            # /s/ - Cas particuliers
+            "moins": "s", "fois": "z",
+            
+            # /g/ - Littéraire
+            "sang": "g",
+        }
+
+        self.H_ASPIRE_EXTENDED = {
+            "héros", "haricot", "haricots", "hache", "haine", "hauteur", "honte",
+            "hibou", "hiver", "hors", "huit", "huile", "humain", "humour",
+            "hurler", "hâter", "harceler", "harasser", "heurter", "hocher",
+            "haut", "hautain", "hasard", "hardi", "hareng", "harmonie", "harnais",
+            "harpie", "hasardeux", "hauban", "haubannage", "haubert", "hausse",
+            "haussement", "havane", "havre", "hébraïque", "hébreu", "hécatombe",
+            "hématite", "hémicycle", "hémophile", "hémorragie", "hémorroïde",
+            "henne", "héraldique", "héraut", "herbe", "herborisateur", "herbicide",
+            "hercule", "hercynien", "hère", "hérédité", "hérés", "hérésiarque",
+            "hérésie", "hérétique", "hérétiquement", "héretondelle", "héreuille",
+            "herge", "hérissement", "hérisser", "hérisson", "hérite", "hériter",
+            "héritière", "hermandad", "hermitage", "hermite", "hermitique",
+            "hermès", "hermétique", "hermétiquement", "hermétisme", "hermione",
+            "hermodactyle", "hermondactor", "hermopolite", "hermosa", "hermule",
+            "hernade", "hernaire", "herniaire", "hernie", "hernié", "hernieux",
+            "héro", "héroïde", "héroïquement", "héroïsme", "héron", "héronière",
+            "héronniaire", "herpès", "herpestidé", "herpétologie", "herpétologue",
+            "herppe", "herr", "herse", "herseau", "hersiere", "hersécher",
+            "hersher", "herstaille", "hertfordshire", "héruque", "hervelette",
+            "hervelle", "hérvens", "heryage", "hésitamment", "hésitance",
+            "hésitant", "hésitation", "hésiter", "hétaire", "hétérocène",
+            "hétérodoxe", "hétérododoxie", "hétérogamie", "hétérogène",
+            "hétérogénéité", "hétérographe", "hétérographie", "hétérométrie",
+            "hétéromorphe", "hétéromorphie", "hétéronyme", "hétéronymie",
+            "hétéronyque", "hétéropathe", "hétéropathie", "hétérophage",
+            "hétérophagie", "hétérophile", "hétérophilité", "hétérophonie",
+            "hétérophoniquement", "hétérophoniste", "hétérophylle", "hétérophyllé",
+            "hétérophyllie", "hétéroplasie", "hétéroplaste", "hétéropneuste", "hétéropode"
+        }
+
+        # Rétrocompatibilité interne au linker
+        self.LIAISON_MAP = {
+            "les": "z", "des": "z", "ces": "z", "un": "n",
+            "aucun": "n", "tout": "t", "petit": "t", "grand": "t", "premier": "ʁ",
+        }
+        self.H_ASPIRE = set(self.H_ASPIRE_EXTENDED)
+        self.FORBIDDEN_LIAISON_AFTER = {"et", "ou", "mais", "donc", "or", "ni", "car"}
+        self.VOWELS = set("aeiouyàâäéèêëïîôöùûüœæ")
+
+        # ═════════════════════════════════════════════════════════════════
         # DICTIONNAIRE DE MOTS SPÉCIAUX
         # ═════════════════════════════════════════════════════════════════
         self.special_words = {
-            # Mots difficiles ou irréguliers
             'monsieur': 'məsjø',
             'madame': 'madam',
             'mademoiselle': 'madmwazɛl',
@@ -827,119 +341,84 @@ class FrenchIPAPhoneticizer:
     
     def _initialize_rules(self) -> None:
         """Initialise les règles phonétiques contextuelles."""
-        
         self.rules = {
-            # S intervocalique → z
             'rule_s_intervocalic': {
                 'pattern': r'([aeiouy])s([aeiouy])',
                 'replacement': r'\1z\2',
                 'description': 'S entre deux voyelles → z'
             },
-            
-            # C avant e/i/y → s (français, Français)
             'rule_c_soft': {
                 'pattern': r'c(?=[eiy])',
                 'replacement': 's',
                 'description': 'C avant e, i, y → s'
             },
-            
-            # C avant a/o/u → k (cart, cour, cul)
             'rule_c_hard': {
                 'pattern': r'c(?=[aou])',
                 'replacement': 'k',
                 'description': 'C avant a, o, u → k'
             },
-            
-            # G avant e/i/y → ʒ (giraffe, genou)
             'rule_g_soft': {
                 'pattern': r'g(?=[eiy])',
                 'replacement': 'ʒ',
                 'description': 'G avant e, i, y → ʒ'
             },
-            
-            # G avant a/o/u → g (gaz, gourde)
             'rule_g_hard': {
                 'pattern': r'g(?=[aou])',
                 'replacement': 'g',
                 'description': 'G avant a, o, u → g'
             },
-            
-            # X avant consonne → ks (taxi)
             'rule_x_cons': {
                 'pattern': r'x(?=[bdfghjklmnprstvwxz])',
                 'replacement': 'ks',
                 'description': 'X avant consonne → ks'
             },
-            
-            # H aspié: pas de liaison (début certain mots)
             'rule_h_aspire': {
                 'pattern': r'\bh',
-                'replacement': 'ʔ',  # glottal stop marqueur
+                'replacement': 'ʔ',
                 'description': 'H aspiré → glottal stop'
             },
         }
         
         logger.debug("Règles phonétiques initialisées")
     
-# Exemple d'intégration dans french_prosody.py / phonetic_ipa.py
-
-def process_french_text(text: str):
-    # 1. Segmentation en mots
-    words = tokenize_into_words(text) # Fonction existante de découpage
-    
-    # 2. Analyse IPA unitaire mot par mot
-    word_ipas = [get_word_ipa(w) for w in words]
-    
-    # 3. Application de la couche inter-mots (NOUVEAU)
-    linker = FrenchPhoneticLinker()
-    linked_ipas = linker.link_words(words, word_ipas)
-    
-    # 4. Passage à la prosodie et au TTS
-    prosody_result = apply_prosody(linked_ipas)
-    return prosody_result
-
     # ════════════════════════════════════════════════════════════════════
-    # MÉTHODES PRINCIPALES
+    # MÉTHODES PRINCIPALES DE CONVERSION ET LIAISONS
     # ════════════════════════════════════════════════════════════════════
     
     @lru_cache(maxsize=1024)
     def text_to_ipa(self, text: str) -> str:
         """
-        Convertit un texte français complet en IPA en intégrant 
-        les liaisons, enchaînements et élisions inter-mots.
+        Convertit texte français complet en IPA avec gestion des liaisons.
+        
+        Args:
+            text: Texte à convertir
+            
+        Returns:
+            Transcription IPA complète (ex: '/ɛkstʁaɔʁdinɛʁ/')
         """
         try:
             if not text or not isinstance(text, str):
                 return ""
             
-            # Nettoyage de base
             clean_text = text.lower().strip()
             
-            # Extraction des mots (en préservant les traits d'union pour les verbes inversés)
-            words = re.findall(r"[a-zA-Zàâäéèêëîôöùûüçÿœæ'-]+", clean_text)
-            if not words:
-                return ""
+            # Remplace mots spéciaux d'abord
+            for word, ipa in self.special_words.items():
+                clean_text = re.sub(rf'\b{word}\b', ipa, clean_text, flags=re.IGNORECASE)
             
-            # 1. Transcription IPA unitaire mot par mot
-            word_ipas = []
-            for word in words:
-                word_lower = word.lower()
-                if word_lower in self.special_words:
-                    word_ipas.append(self.special_words[word_lower])
-                else:
-                    word_ipas.append(self._convert_word_to_ipa(word_lower))
+            # Extraction des mots pour appliquer les règles de liaison
+            words = clean_text.split()
+            analyses = [self._convert_word_to_ipa(w) for w in words]
             
-            # 2. Application de la couche inter-mots (FrenchPhoneticLinker)
-            linker = FrenchPhoneticLinker()
-            linked_ipas = linker.link_words(words, word_ipas)
+            # Application des liaisons contextuelles étendues
+            linked_analyses = self.link_words(words, analyses)
             
-            # 3. Assemblage final de la chaîne phonétique pour le TTS
-            result = " ".join(linked_ipas)
-            logger.debug(f"Texte original: '{text}' → IPA lié: '{result}'")
+            result = ''.join(linked_analyses)
+            logger.debug(f"'{text}' → '{result}'")
             return f"/{result}/"
         
         except Exception as e:
-            logger.error(f"Erreur conversion IPA avec liaisons: {e}")
+            logger.error(f"Erreur conversion IPA: {e}")
             return ""
     
     def _convert_word_to_ipa(self, word: str) -> str:
@@ -954,69 +433,171 @@ def process_french_text(text: str):
         while i < len(word):
             converted = False
             
-            # Essaye trigraphes d'abord
+            # Trigraphes
             if i + 3 <= len(word):
                 trigraph = word[i:i+3]
-                if trigraph in self.digraphs:  # Peut contenir trigraphes
+                if trigraph in self.digraphs:
                     result += self.digraphs[trigraph]
                     i += 3
                     converted = True
             
-            # Puis digraphes
+            # Digraphes
             if not converted and i + 2 <= len(word):
                 digraph = word[i:i+2]
-                
-                # Voyelles nasales (priorité haute)
                 if digraph in self.vowels_nasal:
                     result += self.vowels_nasal[digraph]
                     i += 2
                     converted = True
-                
-                # Digraphes consonantiques
                 elif digraph in self.digraphs:
                     result += self.digraphs[digraph]
                     i += 2
                     converted = True
             
-            # Puis caractères simples
+            # Caractères simples
             if not converted:
                 char = word[i]
-                
-                # Voyelles orales
                 if char in self.vowels_oral:
                     result += self.vowels_oral[char]
                     i += 1
                     converted = True
-                
-                # Consonnes
                 elif char in self.consonants:
                     result += self.consonants[char]
                     i += 1
                     converted = True
-                
-                # Caractère inconnu → ignore
                 else:
                     i += 1
         
         return result
+
+    def _extract_core_word(self, word: str) -> str:
+        """Extrait le mot lexical core pour liaison après élisions."""
+        if "'" in word:
+            word = word.split("'")[-1]
+        if "-" in word:
+            word = word.split("-")[0]
+        return word.strip()
     
+    def _handle_h_aspire_improved(self, word: str) -> bool:
+        """Vérification améliorée pour h aspiré. Retourne True si h aspiré."""
+        word = word.lower().strip()
+        if not word.startswith("h"):
+            return False
+        return word in self.H_ASPIRE_EXTENDED or word in self.H_ASPIRE
+    
+    def suggest_liaison_for_word(self, word: str) -> Optional[str]:
+        """Suggère la consonne de liaison pour un mot donné."""
+        word_normalized = self._extract_core_word(word.lower())
+        return self.LIAISON_MAP_EXTENDED.get(word_normalized)
+
+    def link_words(self, words: list[str], analyses: list[str]) -> list[str]:
+        """Applique les liaisons/enchaînements aux IPA unitaires."""
+        if not words or not analyses or len(words) != len(analyses):
+            return analyses
+
+        linked = list(analyses)
+
+        for i in range(len(words) - 1):
+            current = words[i].lower().strip(".,!?;:«»\"'()[]")
+            current_for_liaison = current.split("'")[-1]
+            next_word = words[i + 1].lower().strip(".,!?;:«»\"'()[]")
+
+            if not current or not next_word:
+                continue
+
+            # 1. Formes avec trait d'union
+            if "-" in words[i]:
+                linked[i] = self._handle_hyphenated(words[i], linked[i], next_word)
+                continue
+
+            # 2. Pas de liaison après les mots interdits
+            if current in self.FORBIDDEN_LIAISON_AFTER:
+                continue
+
+            # 3. Le mot suivant doit commencer par un son vocalique
+            if not self._starts_with_vowel(next_word):
+                continue
+
+            # 4. Liaison lexicale connue
+            consonant = self.LIAISON_MAP_EXTENDED.get(current_for_liaison) or self.LIAISON_MAP.get(current_for_liaison)
+            if consonant:
+                linked[i] = self._append_linked_consonant(linked[i], consonant)
+
+        return linked
+
+    def _starts_with_vowel(self, word: str) -> bool:
+        """Retourne True si le mot suivant commence par un son vocalique."""
+        word = word.lower().strip()
+        if not word:
+            return False
+
+        if self._handle_h_aspire_improved(word) or word in self.H_ASPIRE:
+            return False
+
+        if word.startswith("h"):
+            return len(word) > 1 and word[1] in self.VOWELS
+
+        return word[0] in self.VOWELS
+
+    def _append_linked_consonant(self, ipa: str, consonant: str) -> str:
+        """Ajoute une consonne de liaison sans casser l'IPA existante."""
+        if not ipa:
+            return ipa
+        if ipa.endswith(consonant) or f"‿{consonant}" in ipa:
+            return ipa
+        return f"{ipa}‿{consonant}"
+
+    def _handle_hyphenated(self, word: str, ipa: str, next_word: str = "") -> str:
+        """Traite les formes pronominales avec trait d'union."""
+        lower = word.lower()
+
+        if "-t-" in lower:
+            parts = lower.split("-t-", 1)
+            if len(parts) == 2:
+                left = self._safe_word_ipa(parts[0])
+                right = self._safe_word_ipa(parts[1])
+                if left and right:
+                    return f"{left}‿t {right}"
+
+        if lower.startswith(("dit-", "va-", "a-", "parle-", "chante-", "est-")):
+            parts = lower.split("-", 1)
+            if len(parts) == 2:
+                left_ipa = self._safe_word_ipa(parts[0])
+                right_ipa = self._safe_word_ipa(parts[1])
+                if left_ipa and right_ipa:
+                    return f"{left_ipa}‿t {right_ipa}"
+
+        return ipa
+
+    def _safe_word_ipa(self, word: str) -> str:
+        """Conversion minimale utilisée uniquement pour les formes avec trait d'union."""
+        simple = {
+            "dit": "di", "va": "va", "a": "a", "parle": "paʁl",
+            "chante": "ʃɑ̃t", "est": "ɛ", "il": "il", "elle": "ɛl",
+            "ils": "il", "elles": "ɛl", "on": "ɔ̃",
+        }
+        return simple.get(word.lower(), "")
+
+    def _is_liaison_word(self, word: str) -> bool:
+        """Détermine si un mot peut déclencher une liaison."""
+        return word in {
+            "les", "des", "ces", "mes", "tes", "ses", "nos", "vos", "leurs",
+            "un", "bon", "tout", "petit", "grand", "aux", "dans", "sans",
+            "comment", "quand", "font"
+        }
+
+    def _get_liaison_consonant(self, word: str) -> str:
+        """Associe la consonne muette finale qui reparaît lors de la liaison."""
+        mapping = {
+            "comment": "t",
+            "les": "z", "des": "z", "ces": "z", "mes": "z", "tes": "z", "ses": "z",
+            "nos": "z", "vos": "z", "leurs": "z", "aux": "z", "dans": "z", "sans": "z",
+            "un": "n", "bon": "n", "en": "n", "on": "n",
+            "tout": "t", "petit": "t", "grand": "t"
+        }
+        return mapping.get(word, "")
+
     def get_phonemes(self, word: str) -> List[PhoneticSegment]:
-        """
-        Décompose un mot en segments phonétiques.
-        
-        Args:
-            word: Mot à analyser
-            
-        Returns:
-            Liste de segments avec graphèmes et IPA
-            
-        Examples:
-            >>> phonetizer.get_phonemes("chat")
-            [
-                PhoneticSegment(grapheme='ch', ipa='ʃ', syllable_number=1),
-                PhoneticSegment(grapheme='a', ipa='a', syllable_number=1)
-            ]
-        """
+        """Décompose un mot en segments phonétiques."""
         try:
             if not word:
                 return []
@@ -1025,20 +606,17 @@ def process_french_text(text: str):
             segments = []
             ipa = self._convert_word_to_ipa(word)
             
-            # Aligne graphèmes avec IPA
             i_graph = 0
             i_ipa = 0
             syllable = 1
             
             while i_graph < len(word) and i_ipa < len(ipa):
-                # Détecte début de nouvelle syllabe (voyelle)
                 if i_graph < len(word) and word[i_graph] in 'aeiouyàâäéèêëïîôöùûüœæ':
                     syllable_num = syllable
                     syllable += 1
                 else:
                     syllable_num = syllable
                 
-                # Extrait graphème
                 if i_graph + 2 <= len(word) and word[i_graph:i_graph+2] in self.digraphs:
                     grapheme = word[i_graph:i_graph+2]
                     i_graph += 2
@@ -1046,42 +624,22 @@ def process_french_text(text: str):
                     grapheme = word[i_graph]
                     i_graph += 1
                 
-                # Extrait IPA correspondant
                 ipa_segment = ipa[i_ipa]
                 i_ipa += 1
                 
-                # Crée segment
-                segment = PhoneticSegment(
+                segments.append(PhoneticSegment(
                     grapheme=grapheme,
                     ipa=ipa_segment,
                     syllable_number=syllable_num
-                )
-                segments.append(segment)
+                ))
             
-            logger.debug(f"Segments de '{word}': {len(segments)}")
             return segments
-        
         except Exception as e:
             logger.error(f"Erreur extraction phonèmes: {e}")
             return []
     
     def analyze_complete(self, word: str) -> IPAAnalysis:
-        """
-        Analyse phonétique complète d'un mot.
-        
-        Args:
-            word: Mot à analyser
-            
-        Returns:
-            Analyse détaillée avec IPA, segments, traits
-            
-        Examples:
-            >>> analysis = phonetizer.analyze_complete("extraordinaire")
-            >>> analysis.ipa_full
-            '/ɛkstʁaɔʁdinɛʁ/'
-            >>> analysis.syllable_count
-            4
-        """
+        """Analyse phonétique complète d'un mot."""
         try:
             if not word:
                 return IPAAnalysis(original_text="", ipa_full="")
@@ -1090,17 +648,12 @@ def process_french_text(text: str):
             ipa_full = self._convert_word_to_ipa(word)
             segments = self.get_phonemes(word)
             
-            # Compte syllabes
             syllable_count = max([s.syllable_number for s in segments]) if segments else 1
-            
-            # Extrait consonnes et voyelles
             consonants = [s.ipa for s in segments if self._is_consonant_ipa(s.ipa)]
             vowels = [s.ipa for s in segments if self._is_vowel_ipa(s.ipa)]
-            
-            # Détecte traits phonétiques
             features = self._extract_features(ipa_full, segments)
             
-            analysis = IPAAnalysis(
+            return IPAAnalysis(
                 original_text=word,
                 ipa_full=f"/{ipa_full}/",
                 segments=segments,
@@ -1109,33 +662,21 @@ def process_french_text(text: str):
                 vowels=vowels,
                 features=features
             )
-            
-            logger.info(f"Analyse complète '{word}': {syllable_count} syllabes")
-            return analysis
-        
         except Exception as e:
             logger.error(f"Erreur analyse complète: {e}")
             return IPAAnalysis(original_text=word, ipa_full="")
     
-    # ════════════════════════════════════════════════════════════════════
-    # MÉTHODES AUXILIAIRES
-    # ════════════════════════════════════════════════════════════════════
-    
     def _is_consonant_ipa(self, ipa_char: str) -> bool:
         """Vérifie si c'est une consonne IPA."""
-        consonants_ipa = 'pbtdkgfvszʃʒθðmn ɲŋlʁjwɥxɣ'
-        return ipa_char in consonants_ipa
+        return ipa_char in 'pbtdkgfvszʃʒθðmn ɲŋlʁjwɥxɣ'
     
     def _is_vowel_ipa(self, ipa_char: str) -> bool:
         """Vérifie si c'est une voyelle IPA."""
-        vowels_ipa = 'ieyøœuoɔaɑʌəɛɑ̃ɛ̃œ̃ɔ̃'
-        return ipa_char in vowels_ipa or ipa_char.isalpha()
+        return ipa_char in 'ieyøœuoɔaɑʌəɛɑ̃ɛ̃œ̃ɔ̃' or ipa_char.isalpha()
     
     def _extract_features(self, ipa_full: str, segments: List[PhoneticSegment]) -> Dict[str, str]:
         """Extrait traits phonétiques du mot."""
         features = {}
-        
-        # Traits généraux
         has_nasal = any('̃' in s.ipa for s in segments)
         has_uvular = 'ʁ' in ipa_full
         
@@ -1143,15 +684,9 @@ def process_french_text(text: str):
         features['has_uvular_r'] = 'yes' if has_uvular else 'no'
         features['fricatives_count'] = sum(1 for s in segments if s.ipa in 'fvszʃʒ')
         
-        # Commençant par
         if segments:
-            first = segments[0].ipa
-            features['starts_with'] = self._classify_sound(first)
-        
-        # Terminant par
-        if segments:
-            last = segments[-1].ipa
-            features['ends_with'] = self._classify_sound(last)
+            features['starts_with'] = self._classify_sound(segments[0].ipa)
+            features['ends_with'] = self._classify_sound(segments[-1].ipa)
         
         return features
     
@@ -1174,20 +709,11 @@ def process_french_text(text: str):
         return 'unknown'
     
     def compare_ipa(self, word1: str, word2: str) -> Dict[str, Union[str, float]]:
-        """
-        Compare deux mots en IPA.
-        
-        Args:
-            word1, word2: Mots à comparer
-            
-        Returns:
-            Comparaison détaillée
-        """
+        """Compare deux mots en IPA."""
         try:
             ipa1 = self._convert_word_to_ipa(word1)
             ipa2 = self._convert_word_to_ipa(word2)
             
-            # Similarité simple (Levenshtein-like)
             matches = sum(1 for a, b in zip(ipa1, ipa2) if a == b)
             similarity = matches / max(len(ipa1), len(ipa2)) if max(len(ipa1), len(ipa2)) > 0 else 0
             
@@ -1200,7 +726,6 @@ def process_french_text(text: str):
                 'similarity': round(similarity, 2),
                 'distance': abs(len(ipa1) - len(ipa2))
             }
-        
         except Exception as e:
             logger.error(f"Erreur comparaison: {e}")
             return {}
@@ -1245,7 +770,6 @@ if __name__ == "__main__":
     try:
         phonetizer = get_ipa_phonetizer()
         
-        # Tests
         test_words = [
             "chat",
             "extraordinaire",
@@ -1284,167 +808,9 @@ if __name__ == "__main__":
                 print(f"❌ Erreur '{word}': {e}")
         
         print("\n" + "=" * 80)
-        print("\nCOMPARAISONS IPA:\n")
-        print("=" * 80)
-        
-        comparisons = [
-            ("plus", "pluss"),
-            ("tous", "tou"),
-            ("français", "francais"),
-        ]
-        
-        for w1, w2 in comparisons:
-            try:
-                comp = phonetizer.compare_ipa(w1, w2)
-                print(f"\n🔀 Comparaison:")
-                print(f"   '{w1}' ({comp['ipa1']}) vs '{w2}' ({comp['ipa2']})")
-                print(f"   Similitude: {comp['similarity']*100:.0f}%")
-                print(f"   Identiques: {'✓' if comp['identical'] else '✗'}")
-            except Exception as e:
-                print(f"❌ Erreur comparaison: {e}")
-        
-        print("\n" + "=" * 80)
         print("\n✓ Démonstration terminée avec succès!")
         print("✓ Phonétiseur IPA prêt pour intégration TTS.\n")
     
     except Exception as e:
         print(f"❌ Erreur fatale: {e}")
         logger.exception("Erreur dans les tests")
-
-# ════════════════════════════════════════════════════════════════════════════════
-# TESTS & VALIDATION
-# ════════════════════════════════════════════════════════════════════════════════
-
-def test_liaison_map_improvements():
-    """
-    Suite de tests pour les améliorations LIAISON_MAP.
-    À exécuter après implémentation.
-    """
-    test_cases = [
-        # Format: (mot, consonant_attendue, exemple)
-        ("tous", "z", "Tous les enfants"),
-        ("bien", "n", "Bien être"),
-        ("est", "t", "Il est arrivé"),
-        ("dernier", "ʁ", "Dernier ami"),
-        ("beaucoup", "p", "Beaucoup avaient"),
-        ("quelques", "z", "Quelques amis"),
-        ("ancien", "n", "Ancien ami"),
-        ("pendant", "t", "Pendant octobre"),
-        ("plusieurs", "z", "Plusieurs enfants"),
-        ("très", "t", "Très important"),
-    ]
-    
-    print("╔════════════════════════════════════════════╗")
-    print("║ TESTS LIAISON_MAP AMÉLIORISÉE             ║")
-    print("╚════════════════════════════════════════════╝\n")
-    
-    passed = 0
-    failed = 0
-    
-    for word, expected, example in test_cases:
-        actual = LIAISON_MAP_EXTENDED.get(word)
-        status = "✓" if actual == expected else "✗"
-        
-        if actual == expected:
-            passed += 1
-        else:
-            failed += 1
-        
-        print(f"{status} {word:15} → {actual or 'None':5} (attendu: {expected})")
-        print(f"   Exemple: {example}")
-        print()
-    
-    print(f"\nRésultats: {passed} réussis, {failed} échoués")
-    return passed, failed
-
-
-def test_h_aspire_improvements():
-    """
-    Suite de tests pour les améliorations H_ASPIRE.
-    """
-    test_cases = [
-        # Format: (mot, est_aspire, note)
-        ("héros", True, "Classique h aspiré"),
-        ("haricot", True, "Classique h aspiré"),
-        ("haut", True, "Nouveau - ajouté"),
-        ("hasard", True, "Nouveau - ajouté"),
-        ("harmonie", False, "H muet (VÉRIFIER!)"),  # À valider!
-        ("herbe", False, "H muet (VÉRIFIER!)"),     # À valider!
-        ("hermite", False, "H muet (VÉRIFIER!)"),   # À valider!
-        ("hésiter", False, "H muet"),
-    ]
-    
-    print("\n╔════════════════════════════════════════════╗")
-    print("║ TESTS H_ASPIRE AMÉLIORISÉ                 ║")
-    print("╚════════════════════════════════════════════╝\n")
-    
-    passed = 0
-    failed = 0
-    warnings = 0
-    
-    for word, expected_aspire, note in test_cases:
-        is_aspire = word in H_ASPIRE_EXTENDED
-        
-        if is_aspire == expected_aspire:
-            status = "✓"
-            passed += 1
-        elif "VÉRIFIER" in note:
-            status = "⚠"
-            warnings += 1
-        else:
-            status = "✗"
-            failed += 1
-        
-        print(f"{status} {word:15} aspiré={is_aspire:5} ({note})")
-    
-    print(f"\nRésultats: {passed} corrects, {warnings} à vérifier, {failed} erronés")
-    return passed, warnings, failed
-
-
-def generate_improvement_report():
-    """
-    Génère un rapport complet des améliorations.
-    """
-    print("\n" + "="*70)
-    print("RAPPORT GÉNÉRÉ DES AMÉLIORATIONS")
-    print("="*70 + "\n")
-    
-    print(f"✓ LIAISON_MAP originale: {len({'les', 'des', 'ces', 'un', 'aucun', 'tout', 'premier'})} entrées")
-    print(f"✓ LIAISON_MAP améliorisée: {len(LIAISON_MAP_EXTENDED)} entrées")
-    print(f"  → Augmentation: +{len(LIAISON_MAP_EXTENDED) - 56} nouveaux cas\n")
-    
-    print(f"✓ H_ASPIRE original: 15 entrées")
-    print(f"✓ H_ASPIRE améliorisé: {len(H_ASPIRE_EXTENDED)} entrées")
-    print(f"  → Augmentation: +{len(H_ASPIRE_EXTENDED) - 15} nouveaux cas\n")
-    
-    # Analyse par consonant
-    print("Répartition par type de liaison:")
-    consonants = {}
-    for word, consonant in LIAISON_MAP_EXTENDED.items():
-        if consonant not in consonants:
-            consonants[consonant] = []
-        consonants[consonant].append(word)
-    
-    for cons, words in sorted(consonants.items()):
-        print(f"  /{cons}/ : {len(words):3} mots → {', '.join(list(words)[:5])}{f'... (+{len(words)-5})' if len(words) > 5 else ''}")
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-# MAIN - À exécuter pour valider
-# ════════════════════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    print("\n" + "╔" + "═"*68 + "╗")
-    print("║" + " "*15 + "CODE D'IMPLÉMENTATION - TESTS" + " "*23 + "║")
-    print("╚" + "═"*68 + "╝\n")
-    
-    # Tests
-    test_liaison_map_improvements()
-    test_h_aspire_improvements()
-    
-    # Rapport
-    generate_improvement_report()
-    
-    print("\n✓ Tests complétés!")
-    print("✓ Prêt pour intégration dans phonetic_ipa.py")
-    print("✓ Recommandation: valider avec corpus audio avant déploiement\n")
