@@ -219,40 +219,30 @@ class FrenchProsodyEngineAdvanced:
             # PIÈGES PHONÉTIQUES AVANCÉS & CONSONNES MUETTES
             # ═════════════════════════════════════════════════════════════════
             self.phonetic_traps_advanced: Dict[str, Union[str, Callable]] = {
-                # Consonnes finales muettes (très courant en français)
-                # NOUVEAU CODE (on garde juste le mot)
                 r'\b(beaucoup|fait|pois|noix|trois|mois|temps|sens|enfant|sang|rang|long|fort|port|mort|sort)\b(?!\w)':
                 lambda m: m.group(0),
                 
-                # Plus problématique
                 r'\bplus\s+de\b': 'plu-de',
                 r'\bplus\s+les\b': 'plus-z-les',
                 
-                # Des (sonore vs sourd)
                 r'\bdes\s+([bcdfghjklmnpqrstvwxyz])': r'des-\1',
                 r'\bdes\s+([aàeéèêiïoôuùyAÀEÉÈÊIÏOÔUÙY])': r'des-z-\1',
                 
-                # Tous vs tout
                 r'\btous\b(?=\s+les)': 'tous-z',
                 r'\btout\b': 'tout-contexte',
                 
-                # Vingt
                 r'\bvingt\s+et\s+un\b': 'ving-t-et-un',
                 r'\bvingt(?!\s+et)\b': 'vingt-muet',
                 
-                # Cent
                 r'\bcent\s+un\b': 'sahn-t-un',
                 r'\bcentre\b': 'sahn-tre',
                 
-                # Fils
                 r'\bun\s+fils\b': 'un-fiss',
                 r'\bdes\s+fils\b': 'des-fil',
                 
-                # Œuf / Œufs
                 r'\bœuf(?!s)\b': 'œuf-muet',
                 r'\bœufs\b': 'œufs-z',
                 
-                # Nombres
                 r'\bsix\b(?=\s+[bcdfghjklmnpqrstvwxyz])': 'six',
                 r'\bdix\b(?=\s+[bcdfghjklmnpqrstvwxyz])': 'dis',
             }
@@ -261,20 +251,17 @@ class FrenchProsodyEngineAdvanced:
             # ABRÉVIATIONS FRANÇAISES & SIGLES
             # ═════════════════════════════════════════════════════════════════
             self.abbreviations_advanced: Dict[str, str] = {
-                # Titres & civilités
                 r'\bM\.': 'Monsieur', r'\bMme\.': 'Madame', r'\bMlle\.': 'Mademoiselle',
                 r'\bDr\.': 'Docteur', r'\bMe\.': 'Maître', r'\bProf\.': 'Professeur',
                 r'\bMgr\.': 'Monseigneur', r'\bSr\.': 'Sieur',
                 
-                # Formules
                 r'\bEtc\.': 'et cetera', r'\betc\.': 'et cetera',
                 r'\bp\.ex\.': 'par exemple', r'\bp\.s\.': 'post-scriptum',
                 r'\bc\.à\.d\.': 'c\'est-à-dire', r'\bi\.e\.': 'c\'est-à-dire',
                 r'\bN\.B\.': 'nota bene', r'\bn\.b\.': 'nota bene',
                 r'\bvs\.': 'versus', r'\bVs\.': 'versus',
-                r'\bet al\.': 'et alii', r'\bet al\.': 'et autres',
+                r'\bet al\.': 'et alii',
 
-                # Institutions & entreprises
                 r'\bS\.A\.R\.L\.': 'Société à Responsabilité Limitée',
                 r'\bS\.A\.S\.': 'Société par Actions Simplifiée',
                 r'\bS\.A\.': 'Société Anonyme', r'\bSté\.': 'Société',
@@ -282,7 +269,6 @@ class FrenchProsodyEngineAdvanced:
                 r'\bCie\.': 'Compagnie', r'\bLtd\.': 'Limitée',
                 r'\bInc\.': 'Incorporée',
                 
-                # Unités & mesures
                 r'\bNo\.': 'numéro', r'\bno\.': 'numéro',
                 r'\bBd\.': 'Boulevard', r'\bAv\.': 'Avenue',
                 r'\bkg\.': 'kilogramme', r'\bm\.': 'mètre',
@@ -291,11 +277,9 @@ class FrenchProsodyEngineAdvanced:
             }
             
             # ═════════════════════════════════════════════════════════════════
-            # EXPRESSIONS LATINES (prononciations académiques)
+            # EXPRESSIONS LATINES
             # ═════════════════════════════════════════════════════════════════
             self.latin_expressions_academic: Dict[str, str] = {
-                r'\ba\s+priori\b': 'a-priori',
-
                 r'\ba\s+priori\b': 'a-priori',
                 r'\ba\s+posteriori\b': 'a-posteriori',
                 r'\bab\s+initio\b': 'ab-initio',
@@ -321,7 +305,7 @@ class FrenchProsodyEngineAdvanced:
                 r'\bcurriculum\s+vitae\b': 'curriculum-vité',
                 r'\bcv\b': 'CV',
                 r'\bcarpe\s+diem\b': 'carpe-diem',
-                }
+            }
             
             # ═════════════════════════════════════════════════════════════════
             # INTERJECTIONS & INCISES
@@ -329,7 +313,7 @@ class FrenchProsodyEngineAdvanced:
             self.interjections_extended: List[str] = [
                 'ah', 'oh', 'eh', 'euh', 'oups', 'hélas', 'chut', 'aïe', 'bravo',
                 'oulah', 'zut', 'bah', 'bof', 'pouah', 'holà', 'hein', 'quoi',
-                'disons', 'voyez', 'entendez', 'écoutez', 'tenez', 'voilà','soit', 'sait-on',
+                'disons', 'voyez', 'entendez', 'écoutez', 'tenez', 'voilà', 'soit', 'sait-on',
             ]
             
             logger.debug("Règles phonétiques initialisées")
@@ -342,9 +326,6 @@ class FrenchProsodyEngineAdvanced:
     def _initialize_liaison_rules(self) -> None:
         """Initialise les règles de liaison complètes."""
         try:
-            # ═════════════════════════════════════════════════════════════════
-            # H-ASPIRÉ & DISJONCTION
-            # ═════════════════════════════════════════════════════════════════
             self.h_aspire_words: Set[str] = {
                 'héros', 'haricots', 'haricot', 'hache', 'haine', 'haie',
                 'hambourg', 'hauteur', 'hazard', 'honte', 'hibou', 'hurlant',
@@ -357,26 +338,18 @@ class FrenchProsodyEngineAdvanced:
                 'humecter', 'humeur', 'humide', 'humidité', 'humiliant', 'humilié',
                 'humilier', 'humilité', 'humor', 'humoriste', 'humoristique',
                 'humour', 'humus', 'hune', 'hunebedde', 'huneland', 'huneries',
-                }
+            }
             
             self.disjunction_words: Set[str] = self.h_aspire_words.union({
                 'oui', 'onze', 'uniformément', 'unicellulaire', 'unité',
                 'université', 'univers', 'universel', 'universelle',
             })
             
-            # ═════════════════════════════════════════════════════════════════
-            # LIAISONS OBLIGATOIRES, INTERDITES & FACULTATIVES
-            # ═════════════════════════════════════════════════════════════════
             self.mandatory_liaisons: Dict[str, str] = {
-                # Déterminants
                 r'\b(les|des|ces|mes|tes|ses|nos|vos|leurs|deux|trois)\s+([aàeéèêiïoôuùyAÀEÉÈÊIÏOÔUÙY])':
                     r'\1-z-\2',
-                
-                # Adjectifs antéposés
                 r'\b(petit|grand|bon|mauvais|joli|nouveau|vieux|jeune|ancien|beau)\s+([aàeéèêiïoôuùy])':
                     r'\1-t-\2',
-                
-                # Nombres
                 r'\b(un|deux|trois|quatre|cinq|six|sept|huit|neuf|dix)\s+([aàeéèêiïoôuùy])':
                     r'\1-n-\2',
             }
@@ -399,9 +372,6 @@ class FrenchProsodyEngineAdvanced:
     def _initialize_special_cases(self) -> None:
         """Initialise les cas spéciaux et règles avancées."""
         try:
-            # ═════════════════════════════════════════════════════════════════
-            # ÉLISIONS
-            # ═════════════════════════════════════════════════════════════════
             self.elision_rules: Dict[str, str] = {
                 r'\b(je|me|te|ne|que|de|le|la|jusque|puisque|quoique)\s+([aàeéèêiïoôuùyAÀEÉÈÊIÏOÔUÙYhH])':
                     r"\1'\2",
@@ -410,17 +380,11 @@ class FrenchProsodyEngineAdvanced:
                 r'\bpresque\s+([aàeéèêiïoôuùyAÀEÉÈÊIÏOÔUÙY])': r"presqu'\1",
             }
             
-            # ═════════════════════════════════════════════════════════════════
-            # SCHWA (e caduc) & RÉDUCTION VOCALIQUE
-            # ═════════════════════════════════════════════════════════════════
             self.schwa_erasure_patterns: Dict[str, str] = {
                 r'(\b\w+le|de|le|ce|ne|se)\s+([aàeéèêiïoôuùyAÀEÉÈÊIÏOÔUÙY])':
                     r"\1'\2",
             }
             
-            # ═════════════════════════════════════════════════════════════════
-            # NUMÉRAUX & ORDINAUX
-            # ═════════════════════════════════════════════════════════════════
             self.numbers_to_french: Dict[int, str] = {
                 0: "zéro", 1: "un", 2: "deux", 3: "trois", 4: "quatre", 5: "cinq",
                 6: "six", 7: "sept", 8: "huit", 9: "neuf", 10: "dix",
@@ -432,19 +396,17 @@ class FrenchProsodyEngineAdvanced:
             }
             
             self.months_map = {
-            '01': 'janvier', '1': 'janvier',
-            '02': 'février', '2': 'février',
-            '03': 'mars', '3': 'mars',
-            '04': 'avril', '4': 'avril',
-            '05': 'mai', '5': 'mai',
-            '06': 'juin', '6': 'juin',
-            '07': 'juillet', '7': 'juillet',
-            '08': 'août', '8': 'août',
-            '09': 'septembre', '9': 'septembre',
-            '10': 'octobre',
-            '11': 'novembre',
-            '12': 'décembre'
-        }
+                '01': 'janvier', '1': 'janvier',
+                '02': 'février', '2': 'février',
+                '03': 'mars', '3': 'mars',
+                '04': 'avril', '4': 'avril',
+                '05': 'mai', '5': 'mai',
+                '06': 'juin', '6': 'juin',
+                '07': 'juillet', '7': 'juillet',
+                '08': 'août', '8': 'août',
+                '09': 'septembre', '9': 'septembre',
+                '10': 'octobre', '11': 'novembre', '12': 'décembre'
+            }
 
             self.roman_numerals_map: Dict[str, str] = {
                 'I': 'un', 'II': 'deux', 'III': 'trois', 'IV': 'quatre', 'V': 'cinq',
@@ -454,35 +416,13 @@ class FrenchProsodyEngineAdvanced:
                 'C': 'cent', 'D': 'cinq-cents', 'M': 'mille',
             }
             
-            # ═════════════════════════════════════════════════════════════════
-            # PAUSES & TIMINGS PROSODIQUES
-            # ═════════════════════════════════════════════════════════════════
             self.silence_after_punctuation: Dict[str, int] = {
-                '.': 600,      # Point final
-                '!': 700,      # Point d'exclamation
-                '?': 700,      # Point d'interrogation
-                '…': 1000,     # Points de suspension
-                ':': 400,      # Deux-points (énumération)
-                ';': 500,      # Point-virgule (pause intermédiaire)
-                ',': 200,      # Virgule
-                '«': 300,      # Guillemet ouvrant
-                '»': 300,      # Guillemet fermant
-                '!': 700,      # Exclamation
-                '?': 700,      # Interrogation
-                '…': 1000,     # Suspension
-                ',': 200,      # Virgule
-                ';': 300,      # Point-virgule
-                ':': 250,      # Deux-points
+                '.': 600, '!': 700, '?': 700, '…': 1000,
+                ':': 400, ';': 500, ',': 200, '«': 300, '»': 300,
             }
             
-            # ═════════════════════════════════════════════════════════════════
-            # ASSIMILATION CONSONANTIQUE (NOUVEAU)
-            # ═════════════════════════════════════════════════════════════════
             self.assimilation_rules: Dict[str, Tuple[str, AssimilationType]] = {
-                # Progressives (n + s → n.s mouillé)
                 r'\b(input)\b': ('input', AssimilationType.PROGRESSIVE),
-                
-                # Régressives (surtout en jonction)
                 r'\b(vos)\b(?=\s+[tdsz])': ('voz', AssimilationType.REGRESSIVE),
                 r'\b(pas)\b(?=\s+t)': ('paz-t', AssimilationType.REGRESSIVE),
             }
@@ -499,18 +439,8 @@ class FrenchProsodyEngineAdvanced:
     # ════════════════════════════════════════════════════════════════════════
     
     def _get_compiled_pattern(self, pattern: str, flags: int = re.IGNORECASE | re.UNICODE) -> Optional[Pattern]:
-        """
-        Récupère un pattern compilé du cache ou le compile et le stocke.
-        
-        Args:
-            pattern: Pattern regex
-            flags: Flags de compilation
-            
-        Returns:
-            Pattern compilé ou None en cas d'erreur
-        """
+        """Récupère un pattern compilé du cache ou le compile."""
         cache_key = f"{pattern}:{flags}"
-        
         if cache_key in self._pattern_cache:
             return self._pattern_cache[cache_key]
         
@@ -532,12 +462,12 @@ class FrenchProsodyEngineAdvanced:
         return text.strip()
     
     # ════════════════════════════════════════════════════════════════════════
-    # VALIDATION & SÉCURITÉ
+    # VALIDATION & SÉCURITÉ (Méthode unique retournant un tuple)
     # ════════════════════════════════════════════════════════════════════════
     
     def _validate_input(self, text: str) -> Tuple[bool, str]:
         """
-        Valide le texte en entrée.
+        Valide le texte en entrée de manière rigoureuse.
         
         Returns:
             (is_valid, error_message)
@@ -552,7 +482,6 @@ class FrenchProsodyEngineAdvanced:
             return False, "Texte vide"
         
         try:
-            # Vérifier l'encodage UTF-8
             text.encode('utf-8')
         except UnicodeEncodeError as e:
             return False, f"Erreur encodage: {e}"
@@ -564,15 +493,7 @@ class FrenchProsodyEngineAdvanced:
     # ════════════════════════════════════════════════════════════════════════
     
     def detect_breath_groups(self, text: str) -> List[BreathGroup]:
-        """
-        Détecte les groupes de souffle (unités intonatives).
-        
-        Args:
-            text: Texte à analyser
-            
-        Returns:
-            Liste des groupes de souffle
-        """
+        """Détecte les groupes de souffle (unités intonatives)."""
         try:
             is_valid, error = self._validate_input(text)
             if not is_valid:
@@ -580,7 +501,6 @@ class FrenchProsodyEngineAdvanced:
                 return []
             
             groups = []
-            # Segmentation par ponctuation majeure
             pattern = r'[.!?…]|,(?=\s+[A-ZÀÉÈÊ])'
             segments = re.split(pattern, text)
             
@@ -731,26 +651,22 @@ class FrenchProsodyEngineAdvanced:
             if not text:
                 return text
             
-            # Liaisons interdites
             for pattern, replacement in self.forbidden_liaisons.items():
                 compiled = self._get_compiled_pattern(pattern)
                 if compiled:
                     text = compiled.sub(replacement, text)
             
-            # Liaisons obligatoires
             for pattern, replacement in self.mandatory_liaisons.items():
                 compiled = self._get_compiled_pattern(pattern)
                 if compiled:
                     text = compiled.sub(replacement, text)
             
-            # Disjonction (h-aspiré)
             disjunction_words = '|'.join(re.escape(w) for w in self.disjunction_words)
             pattern = rf'\b(les|des|un|le|la|du)\s+({disjunction_words})\b'
             compiled = self._get_compiled_pattern(pattern)
             if compiled:
                 text = compiled.sub(r'\1 // \2', text)
             
-            # Liaisons facultatives (mode formel)
             if self.formal_mode:
                 for pattern, replacement in self.optional_liaisons.items():
                     compiled = self._get_compiled_pattern(pattern)
@@ -834,7 +750,6 @@ class FrenchProsodyEngineAdvanced:
         try:
             if 1000 <= year < 2000:
                 remainder = year % 1000
-                # On commence directement par "mille" au lieu de traduire le '1' par "un"
                 result = 'mille'
                 if remainder > 0:
                     result += ' ' + self._number_to_french_words(remainder)
@@ -853,7 +768,7 @@ class FrenchProsodyEngineAdvanced:
             return str(year)
     
     def convert_years(self, text: str) -> str:
-        """Convertit les années en toutes lettres et isole la préposition (ex: en, mille...) pour éviter qu'elle ne soit avalée."""
+        """Convertit les années en toutes lettres."""
         try:
             if not text:
                 return text
@@ -864,7 +779,6 @@ class FrenchProsodyEngineAdvanced:
                     year_val = int(match.group(2))
                     if 1300 <= year_val <= 2100:
                         year_words = self._year_to_french_words(year_val)
-                        # Ajout d'une virgule/pause pour forcer le TTS à prononcer distinctement la préposition
                         if prefix.strip().lower() in ['en', 'vers', 'depuis']:
                             return f"{prefix.strip()}, {year_words}"
                         elif prefix:
@@ -937,70 +851,9 @@ class FrenchProsodyEngineAdvanced:
             if self.strict_mode:
                 raise
             return text
-    
-    # ════════════════════════════════════════════════════════════════════════
-    # PIPELINE PRINCIPAL DE PRÉTRAITEMENT
-    # ════════════════════════════════════════════════════════════════════════
-    
-    def preprocess_text(self, text: str) -> str:
-        """Pipeline complet de prétraitement robuste."""
-        try:
-            is_valid, error = self._validate_input(text)
-            if not is_valid:
-                logger.warning(f"Texte invalide: {error}")
-                return ""
-            
-            original_text = text
-            
-            # 0. NETTOYAGE INITIAL ABSOLU (Gère les espaces, la casse et les points collés autour des __H3__, __ h3 __, etc.)
-            text = re.sub(r'[\.\s]*__\s*[hH]\s*\d+\s*__[\.\s]*', ' ', text, flags=re.IGNORECASE)
-
-            # 1. Normalisation typographique
-            text = text.replace('\u00a0', ' ').replace("'", "'").replace('ʼ', "'")
-            text = re.sub(r'…|\.{3,}', '...', text)
-            text = text.replace('—', ', ').replace('–', ', ')
-            text = text.replace('„', '"').replace('"', '"')
-            
-            # 2. Conversions contextuelles (Dates, Heures, Chiffres romains, Années)
-            text = self.convert_dates(text)
-            text = self.convert_times(text)
-            text = self.convert_roman_numerals(text)
-            text = self.convert_years(text)
-            text = self.normalize_abbreviations(text)
-            
-            # 3. Corrections phonétiques
-            text = self.apply_heterophone_corrections(text)
-            text = self.apply_phonetic_traps(text)
-            text = self.apply_elision_rules(text)
-            
-            # 4. Liaisons et disjonctions
-            text = self.apply_liaison_rules(text)
-            text = self.apply_schwa_and_reduction(text)
-            
-            # 5. Expressions spéciales
-            text = self.convert_latin_expressions(text)
-            text = self.process_interjections_and_incises(text)
-            
-            # 6. NETTOYAGE FINAL DE SÉCURITÉ (Élimine tout résidu de balise récalcitrant)
-            text = re.sub(r'[\.\s]*__\s*[hH]\s*\d+\s*__[\.\s]*', ' ', text, flags=re.IGNORECASE)
-            
-            text = re.sub(r'\s+,', ',', text)
-            text = re.sub(r'(\S)([!?])', r'\1 \2', text)
-            text = re.sub(r'(\S):', r'\1 :', text)
-            text = re.sub(r'(\S);', r'\1 ;', text)
-            text = re.sub(r'\s{2,}', ' ', text).strip()
-            
-            logger.debug(f"Texte prétraité: '{original_text[:50]}...' → '{text[:50]}...'")
-            return text
-        
-        except Exception as e:
-            logger.error(f"Erreur prétraitement: {e}")
-            if self.strict_mode:
-                raise
-            return ""
 
     def convert_roman_numerals(self, text: str) -> str:
-        """Convertit les chiffres romains (majuscules ou minuscules, ex: Acte I / Acte i) en lettres."""
+        """Convertit les chiffres romains en lettres."""
         roman_map = {
             r'\b[iI]\b': 'un',
             r'\b[iI]{2}\b': 'deux',
@@ -1026,16 +879,14 @@ class FrenchProsodyEngineAdvanced:
             
             month_name = self.months_map.get(month_num, month_num)
             day_word = "premier" if day == "1" else self._number_to_french_words(int(day)) if day.isdigit() else day
-            
             year_word = self._year_to_french_words(int(year)) if year.isdigit() else year
             return f"{day_word} {month_name} {year_word}"
 
-        # Pattern JJ/MM/AAAA ou JJ/MM/AA
         pattern = r'\b(0?[1-9]|[12]\d|3[01])/(0?[1-9]|1[0-2])/(\d{2,4})\b'
         return re.sub(pattern, replace_date, text)
 
     def convert_times(self, text: str) -> str:
-        """Convertit les heures (H:MM ou H:MM:SS / HhMM) en toutes lettres."""
+        """Convertit les heures en toutes lettres."""
         def replace_time_hm(match):
             hour = match.group(1).lstrip('0') or '0'
             minute = match.group(2)
@@ -1046,10 +897,62 @@ class FrenchProsodyEngineAdvanced:
             min_word = self._number_to_french_words(int(minute))
             return f"{hour_word} {h_word} {min_word}"
 
-        # Pattern HH:MM ou HHhMM
         pattern_hm = r'\b([01]?\d|2[34])[:h]([0-5]\d)\b'
-        text = re.sub(pattern_hm, replace_time_hm, text)
-        return text
+        return re.sub(pattern_hm, replace_time_hm, text)
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # PIPELINE PRINCIPAL DE PRÉTRAITEMENT
+    # ════════════════════════════════════════════════════════════════════════
+
+    def preprocess_text(self, text: str) -> str:
+        """Pipeline complet de prétraitement robuste."""
+        try:
+            is_valid, error = self._validate_input(text)
+            if not is_valid:
+                logger.warning(f"Texte invalide: {error}")
+                return ""
+            
+            original_text = text
+            
+            text = re.sub(r'[\.\s]*__\s*[hH]\s*\d+\s*__[\.\s]*', ' ', text, flags=re.IGNORECASE)
+
+            text = text.replace('\u00a0', ' ').replace("'", "'").replace('ʼ', "'")
+            text = re.sub(r'…|\.{3,}', '...', text)
+            text = text.replace('—', ', ').replace('–', ', ')
+            text = text.replace('„', '"').replace('"', '"')
+            
+            text = self.convert_dates(text)
+            text = self.convert_times(text)
+            text = self.convert_roman_numerals(text)
+            text = self.convert_years(text)
+            text = self.normalize_abbreviations(text)
+            
+            text = self.apply_heterophone_corrections(text)
+            text = self.apply_phonetic_traps(text)
+            text = self.apply_elision_rules(text)
+            
+            text = self.apply_liaison_rules(text)
+            text = self.apply_schwa_and_reduction(text)
+            
+            text = self.convert_latin_expressions(text)
+            text = self.process_interjections_and_incises(text)
+            
+            text = re.sub(r'[\.\s]*__\s*[hH]\s*\d+\s*__[\.\s]*', ' ', text, flags=re.IGNORECASE)
+            
+            text = re.sub(r'\s+,', ',', text)
+            text = re.sub(r'(\S)([!?])', r'\1 \2', text)
+            text = re.sub(r'(\S):', r'\1 :', text)
+            text = re.sub(r'(\S);', r'\1 ;', text)
+            text = re.sub(r'\s{2,}', ' ', text).strip()
+            
+            logger.debug(f"Texte prétraité: '{original_text[:50]}...' → '{text[:50]}...'")
+            return text
+        
+        except Exception as e:
+            logger.error(f"Erreur prétraitement: {e}")
+            if self.strict_mode:
+                raise
+            return ""
 
     def enhance_sentence_for_tts(self, sentence: str, tts_engine: str = "edge") -> str:
         """Améliore phrase pour TTS."""
@@ -1068,15 +971,7 @@ class FrenchProsodyEngineAdvanced:
         return self.enhance_sentence_for_tts(sentence)
     
     def analyze_phonetics_complete(self, text: str) -> PhoneticAnalysis:
-        """
-        Analyse phonétique complète avec tous les détails.
-        
-        Args:
-            text: Texte à analyser
-            
-        Returns:
-            Analyse phonétique complète
-        """
+        """Analyse phonétique complète avec tous les détails."""
         try:
             import time
             start_time = time.time()
@@ -1125,17 +1020,7 @@ def get_french_prosody_engine(
     register: SpeechRegister = SpeechRegister.STANDARD,
     strict_mode: bool = False
 ) -> FrenchProsodyEngineAdvanced:
-    """
-    Obtient moteur de prosodie (singleton avec réinitialisation optionnelle).
-    
-    Args:
-        formal_mode: Mode formel activé
-        register: Registre de langue
-        strict_mode: Mode strict (exceptions vs warnings)
-        
-    Returns:
-        Instance du moteur
-    """
+    """Obtient le moteur de prosodie (singleton)."""
     global _french_prosody_engine
     
     try:
@@ -1157,67 +1042,3 @@ def reset_engine() -> None:
     global _french_prosody_engine
     _french_prosody_engine = None
     logger.info("Moteur réinitialisé")
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# TESTS & DÉMONSTRATION
-# ════════════════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║  French Prosody Engine AVANCÉ & RÉSILIENT - Démonstration       ║")
-    print("╚══════════════════════════════════════════════════════════════════╝\n")
-    
-    try:
-        engine = get_french_prosody_engine(
-            formal_mode=True,
-            register=SpeechRegister.FORMAL,
-            strict_mode=False
-        )
-        
-        test_cases = [
-            "L'événement a eu lieu en 2025 à Paris.",
-            "Il a acheté plus de livres cette année.",
-            "Des héros et des haricots sur la table.",
-            "Tous les enfants sont venus.",
-            "Comment allez-vous ce matin?",
-            "C'est, a priori, une bonne idée de facto.",
-            "Hélas, quel désastre extraordinaire!",
-            "Le 1er février était magnifique.",
-            "Dr. Dupont et Mme Martin se sont réunis.",
-            "Néanmoins, depuis 1789, les progrès sont constants.",
-        ]
-        
-        print("TESTS DE PROSODIE COMPLÈTE:\n")
-        print("=" * 80)
-        
-        for i, text in enumerate(test_cases, 1):
-            try:
-                result = engine.enhance_sentence_for_tts(text)
-                analysis = engine.analyze_phonetics_complete(text)
-                
-                print(f"\n[Test {i}]")
-                print(f"Original  : {text}")
-                print(f"Traité    : {result}")
-                print(f"Groupes   : {len(analysis.breath_groups)}")
-                
-                for j, group in enumerate(analysis.breath_groups, 1):
-                    print(f"  ├─ {j}. \"{group.text[:40]}\" "
-                          f"({group.intonation.value}, emphase: {group.emphasis_level})")
-                
-                print(f"Temps     : {analysis.processing_time_ms:.2f}ms")
-                
-                if analysis.warnings:
-                    print(f"⚠ Avertissements: {', '.join(analysis.warnings)}")
-                
-            except Exception as e:
-                print(f"❌ Erreur test {i}: {e}")
-            
-            print("-" * 80)
-        
-        print("\n✓ Tests complétés avec succès!")
-        print("✓ Moteur résilient et prêt pour TTS académique en français.\n")
-    
-    except Exception as e:
-        print(f"❌ Erreur fatale: {e}")
-        logger.exception("Erreur dans les tests")
