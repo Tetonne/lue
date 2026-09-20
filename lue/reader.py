@@ -12,6 +12,22 @@ import platformdirs
 from . import config, content_parser, progress_manager, audio, ui, input_handler
 from .tts.base import TTSBase
 
+try:
+    # Phase 1 modules (phonetic_ipa.py + prosody_with_ipa.py) are optional in
+    # the current ZIP. When present, they become the preferred TTS preparation
+    # pipeline without changing the text used by the UI/navigation.
+    from .prosody_with_ipa import get_prosody_ipa_pipeline
+except ImportError:
+    get_prosody_ipa_pipeline = None
+
+try:
+    from .french_prosody import get_french_prosody_engine, SpeechRegister
+except Exception:
+    # The bundled french_prosody.py in lue071 is currently syntactically invalid;
+    # do not let that optional fallback prevent the reader from starting.
+    get_french_prosody_engine = None
+    SpeechRegister = None
+
 class Lue:
     def __init__(self, file_path, tts_model: TTSBase | None, overlap: float | None = None):
         self.console = Console()
@@ -23,6 +39,7 @@ class Lue:
         
         self._initialize_state()
         self._initialize_tts(tts_model)
+        self._initialize_prosody_pipeline()
         self._load_content()
         self._initialize_progress()
         self._initialize_ui_state()
@@ -43,6 +60,15 @@ class Lue:
         self.audio_restart_lock = asyncio.Lock()
         self.pending_restart_task = None
         self.playback_speed = 1.0  # Default speed multiplier
+	# split view 
+        # Split View selection state
+        self.split_chapter_selection_idx = 0
+        self.split_view_enabled = config.SPLIT_VIEW_ENABLED
+        self._cached_chapter_titles = None
+
+        # Lazily cached sentence lists, keyed by (chapter_idx, paragraph_idx).
+        # The cache is scoped to the current book and never changes sentence contents.
+        self._sentence_cache = {}
         
         # Add pause toggle lock and task tracking
         self.pause_toggle_lock = asyncio.Lock()
@@ -67,6 +93,76 @@ class Lue:
         self.tts_model = tts_model
         self.tts_voice = tts_model.voice if tts_model and tts_model.voice else config.TTS_VOICES.get(tts_model.name) if tts_model else None
         
+    def _initialize_prosody_pipeline(self):
+        """Initialize the Phase 1 Prosody + IPA pipeline when available.
+
+        The source text remains untouched. The pipeline is only used on the
+        TTS path, so UI rendering, navigation, sentence positions and progress
+        continue to operate on the original cleaned text.
+        """
+        self.prosody_ipa_pipeline = None
+        self.french_prosody_engine = None
+
+        if get_prosody_ipa_pipeline is not None:
+            try:
+                kwargs = {"formal_mode": True}
+                if SpeechRegister is not None:
+                    kwargs["register"] = SpeechRegister.FORMAL
+                self.prosody_ipa_pipeline = get_prosody_ipa_pipeline(**kwargs)
+                self.console.print("[green]Phase 1 IPA + prosody pipeline enabled.[/green]")
+                return
+            except Exception as exc:
+                logging.warning("Phase 1 IPA/prosody initialization failed: %s", exc, exc_info=True)
+
+        # The ZIP contains french_prosody.py but not the Phase 1 IPA modules.
+        # Keep the existing prosody engine as a safe fallback.
+        if get_french_prosody_engine is not None:
+            try:
+                if SpeechRegister is not None:
+                    self.french_prosody_engine = get_french_prosody_engine(
+                        formal_mode=True, register=SpeechRegister.FORMAL
+                    )
+                else:
+                    self.french_prosody_engine = get_french_prosody_engine(formal_mode=True)
+                logging.info("Using existing French prosody engine; Phase 1 IPA module is not installed.")
+            except Exception as exc:
+                logging.warning("French prosody fallback initialization failed: %s", exc, exc_info=True)
+
+    def prepare_tts_text(self, text):
+        """Return TTS-ready text, preferring Phase 1 IPA+prosody when installed.
+
+        This method deliberately returns a string only; the UI never receives
+        the processed representation.
+        """
+        sanitized = content_parser.sanitize_text_for_tts(text)
+        if not sanitized:
+            return ""
+
+        pipeline = getattr(self, "prosody_ipa_pipeline", None)
+        if pipeline is not None:
+            try:
+                data = pipeline.export_tts_compatible(sanitized)
+                if isinstance(data, dict):
+                    # Phase 1 README documents SSML as the TTS-facing export.
+                    ssml = data.get("ssml")
+                    if isinstance(ssml, str) and ssml.strip():
+                        return ssml
+                    for key in ("tts_text", "text", "processed_text"):
+                        value = data.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value
+            except Exception as exc:
+                logging.warning("Phase 1 IPA/prosody processing failed; using fallback: %s", exc, exc_info=True)
+
+        engine = getattr(self, "french_prosody_engine", None)
+        if engine is not None:
+            try:
+                return engine.prepare_for_tts(sanitized)
+            except Exception as exc:
+                logging.warning("French prosody processing failed; using sanitized text: %s", exc, exc_info=True)
+
+        return sanitized
+
     def _load_content(self, quiet=False):
         """Load and process the document content."""
         if not quiet:
@@ -83,19 +179,36 @@ class Lue:
             self.console.print(f"[green]Document loaded successfully![/green]")
             self.console.print(f"[bold cyan]Loading TTS model...[/bold cyan]")
         
+        # Content has just been replaced, so discard sentence results from the previous book.
+        self._sentence_cache.clear()
+
         self.document_lines = []
         self.line_to_position = {}
         self.position_to_line = {}
         self.paragraph_line_ranges = {}
         
         self.total_sentences = sum(
-            len(content_parser.split_into_sentences(paragraph)) 
-            for chapter in self.chapters 
-            for paragraph in chapter
+            len(self.get_sentences(chap_idx, para_idx))
+            for chap_idx, chapter in enumerate(self.chapters)
+            for para_idx, _ in enumerate(chapter)
         )
         
         # Update document layout immediately after loading content
         ui.update_document_layout(self)
+
+    def get_sentences(self, chapter_idx, paragraph_idx):
+        """Return the cached sentence list for a paragraph.
+
+        Sentence parsing is deterministic for the immutable content of the current
+        book, so repeated UI/audio/navigation requests can safely share the result.
+        """
+        key = (chapter_idx, paragraph_idx)
+        sentences = self._sentence_cache.get(key)
+        if sentences is None:
+            paragraph = self.chapters[chapter_idx][paragraph_idx]
+            sentences = content_parser.split_into_sentences(paragraph)
+            self._sentence_cache[key] = sentences
+        return sentences
 
     async def _switch_book(self, new_path):
         """Switch to a different book."""
@@ -113,7 +226,10 @@ class Lue:
         # Load new content quietly
         self._load_content(quiet=True)
         
-        # Initialize progress for new book
+        # Nouveau livre : les phrases cachées de l'ancien livre sont invalides
+        self._sentence_cache.clear()
+
+	# Initialize progress for new book
         self._initialize_progress()
         
         # Reset some state
@@ -192,7 +308,8 @@ class Lue:
         self.scroll_offset = progress_data["scroll_offset"]
         self.auto_scroll_enabled = progress_data["auto_scroll_enabled"]
         if getattr(config, "UI_MODE_OVERRIDE", False):
-            self.speed_reading_enabled = (config.UI_MODE == 3)
+         self.speed_reading_enabled = (config.UI_MODE == 3)
+         self.split_view_enabled = (config.UI_MODE == 4)
         else:
             self.speed_reading_enabled = progress_data.get("speed_reading_enabled", False)
         if self.speed_reading_enabled:
@@ -338,11 +455,23 @@ class Lue:
         if position_key in self.position_to_line:
             target_line = self.position_to_line[position_key]
             _, height = ui.get_terminal_size()
-            available_height = max(1, height - 4)
+            
+            # --- CALCUL DE HAUTEUR ET DÉCALAGE POUR LE MODE SPLIT VIEW (MODE 4) ---
+            if getattr(self, 'split_view_enabled', False) or config.UI_MODE == 4:
+                panel_height = max(1, height - 2)
+                available_height = max(1, panel_height - 4)
+                # Ajout d'un décalage positif pour remonter le texte s'il apparaît trop bas
+                vertical_center_offset = 2  
+            else:
+                available_height = max(1, height - 4)
+                vertical_center_offset = 0
+
             if hasattr(self, 'first_sentence_jump') and self.first_sentence_jump:
                 new_offset = max(0, target_line) if self._is_position_visible(chapter_idx, paragraph_idx, sentence_idx) else max(0, target_line)
             else:
-                new_offset = max(0, target_line - available_height // 2)
+                # Centre proprement la phrase lue en tenant compte du décalage visuel du panel
+                new_offset = max(0, target_line - (available_height // 2) + vertical_center_offset)
+                
             max_scroll = max(0, len(self.document_lines) - available_height)
             new_offset = min(new_offset, max_scroll)
             if smooth: self._smooth_scroll_to(new_offset)
@@ -391,7 +520,7 @@ class Lue:
             if (chap_idx, para_idx) in self.paragraph_line_ranges:
                 para_start, _ = self.paragraph_line_ranges[(chap_idx, para_idx)]
                 paragraph = self.chapters[chap_idx][para_idx]
-                sentences = content_parser.split_into_sentences(paragraph)
+                sentences = self.get_sentences(chap_idx, para_idx)
                 sentence_positions = []
                 current_char = 0
                 for sent_idx, sentence in enumerate(sentences):
@@ -739,7 +868,7 @@ class Lue:
         else: s += 1
         while c < len(self.chapters):
             if p < len(self.chapters[c]):
-                if s < len(content_parser.split_into_sentences(self.chapters[c][p])):
+                if s < len(self.get_sentences(c, p)):
                     if mode == 'paragraph': s = 0
                     return c, p, s
                 p, s = p + 1, 0
@@ -770,22 +899,22 @@ class Lue:
                 
                 p -= 1
                 if p >= 0:
-                    s = len(content_parser.split_into_sentences(self.chapters[c][p])) - 1
+                    s = len(self.get_sentences(c, p)) - 1
                 else:
                     c -= 1
                     if c >= 0:
                         p = len(self.chapters[c]) - 1
-                        s = len(content_parser.split_into_sentences(self.chapters[c][p])) - 1
+                        s = len(self.get_sentences(c, p)) - 1
             else:
                 c -= 1
                 if c >= 0:
                     p = len(self.chapters[c]) - 1
-                    s = len(content_parser.split_into_sentences(self.chapters[c][p])) - 1
+                    s = len(self.get_sentences(c, p)) - 1
 
         # If we've rewound past the beginning, loop to the end
         c = len(self.chapters) - 1
         p = len(self.chapters[c]) - 1
-        s = len(content_parser.split_into_sentences(self.chapters[c][p])) - 1
+        s = len(self.get_sentences(c, p)) - 1
         return c, p, s
 
     def _get_topmost_visible_sentence(self):
@@ -814,9 +943,9 @@ class Lue:
     
     def _calculate_progress_percentage(self):
         if self.total_sentences == 0: return 100.0
-        sentences_read = sum(len(content_parser.split_into_sentences(p)) for i in range(self.chapter_idx) for p in self.chapters[i])
+        sentences_read = sum(len(self.get_sentences(i, p)) for i in range(self.chapter_idx) for p in range(len(self.chapters[i])))
         if self.chapter_idx < len(self.chapters):
-            sentences_read += sum(len(content_parser.split_into_sentences(self.chapters[self.chapter_idx][i])) for i in range(self.paragraph_idx))
+            sentences_read += sum(len(self.get_sentences(self.chapter_idx, i)) for i in range(self.paragraph_idx))
             sentences_read += self.sentence_idx
         return (sentences_read / self.total_sentences) * 100
 
@@ -1092,28 +1221,35 @@ class Lue:
         while self.running:
             try:
                 current_time = asyncio.get_event_loop().time()
-                needs_update = False
+                
+                # Mise à jour de la position de lecture si le TTS est actif
                 if not self.is_paused:
                     target_pos = (self.chapter_idx, self.paragraph_idx, self.sentence_idx)
                     if target_pos != (self.ui_chapter_idx, self.ui_paragraph_idx, self.ui_sentence_idx):
                         if self.first_sentence_jump and last_sentence_pos is not None and target_pos != last_sentence_pos:
                             self.first_sentence_jump = False
+                        
                         self.ui_chapter_idx, self.ui_paragraph_idx, self.ui_sentence_idx = target_pos
-                        needs_update = True
+                        
+                        # Si l'auto-défilement est actif, on centre dynamiquement la vue sur la phrase lue
                         if self.auto_scroll_enabled:
                             self.last_auto_scroll_position = target_pos
                             self._scroll_to_position(*target_pos)
+                            
                         last_sentence_pos = target_pos
+
+                # Sauvegarde périodique de la progression de lecture
                 if (current_time - last_progress_save_time) >= progress_save_interval:
                     self._save_extended_progress()
                     last_progress_save_time = current_time
                 
-                # Always render on a fixed interval to catch all state changes
+                # Actualisation de l'affichage de l'interface graphique
                 await ui.display_ui(self)
                 last_update_time = current_time
                 
                 await asyncio.sleep(self.ui_update_interval)
-            except asyncio.CancelledError: break
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logging.error(f"Error in UI update loop: {e}", exc_info=True)
                 await asyncio.sleep(self.ui_update_interval)
@@ -1303,6 +1439,18 @@ class Lue:
 
             if not cmd: continue
             
+            # --- TRAITEMENT PRIORITAIRE DE L'AUTO-DÉFILEMENT (TOUCHE 'a') ---
+            if cmd == 'toggle_auto_scroll':
+                self.auto_scroll_enabled = not self.auto_scroll_enabled
+                if self.auto_scroll_enabled:
+                    if self.smooth_scroll_task and not self.smooth_scroll_task.done():
+                        self.smooth_scroll_task.cancel()
+                    self._scroll_to_position_immediate(self.chapter_idx, self.paragraph_idx, self.sentence_idx)
+                self._save_extended_progress()
+                asyncio.create_task(ui.display_ui(self))
+                continue
+            # -------------------------------------------------------------
+
             if cmd == 'toggle_recent_menu':
                 self.show_recent_menu = not self.show_recent_menu
                 if self.show_recent_menu:
@@ -1431,7 +1579,7 @@ class Lue:
                     else: # Handle old format
                         timing_info = {"word_timings": timing_data, "speech_duration": duration, "total_duration": duration}
 
-                    sentences = content_parser.split_into_sentences(self.chapters[c][p])
+                    sentences = self.get_sentences(c, p)
                     current_text = sentences[s]
                     # Use improved word filtering that excludes punctuation-only tokens
                     # but still preserves all text visually
@@ -1555,10 +1703,11 @@ class Lue:
                     self._scroll_to_position_immediate(self.chapter_idx, self.paragraph_idx, self.sentence_idx)
                 self._save_extended_progress()
             elif cmd == 'cycle_ui_complexity':
-                # Cycle through UI modes: 0=minimal, 1=medium, 2=full, 3=speed reading
-                config.UI_MODE = (config.UI_MODE + 1) % 4
+                # Cycle à 5 modes (0, 1, 2, 3, et 4 pour le Split View)
+                config.UI_MODE = (config.UI_MODE + 1) % 5
+                self.split_view_enabled = (config.UI_MODE == 4)
                 self.speed_reading_enabled = (config.UI_MODE == 3)
-                if not self.speed_reading_enabled:
+                if not self.speed_reading_enabled and not self.split_view_enabled:
                     if self._layout_needs_update:
                         self._layout_needs_update = False
                     ui.update_document_layout(self)

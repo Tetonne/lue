@@ -178,8 +178,8 @@ async def main():
     parser.add_argument(
         "-m", "--mode",
         type=int,
-        choices=[0, 1, 2, 3],
-        help="Visual layout mode: 0=minimal, 1=medium, 2=full, 3=speed reading",
+        choices=[0, 1, 2, 3, 4],
+        help="Visual layout mode: 0=minimal, 1=medium, 2=full, 3=speed reading, 4=split view",
     )
     
     if available_tts:
