@@ -729,14 +729,32 @@ def render_split_view(reader, width, height):
         Layout(name="chapters", ratio=2)
     )
 
-    panel_height = max(1, height - 2)
+    # CORRECTION : On retire seulement 1 ligne au lieu de 4 pour supprimer la bande blanche en bas
+    effective_height = max(10, height - 1)
+    available_height = max(1, effective_height - 4)
     available_width = max(20, int(width * 0.8) - 6)
+
+    # Calcul dynamique du même texte de progression qu'en mode 2
+    progress_percent = reader._calculate_ui_progress_percentage()
+    progress_bar_width = 10
+    filled_blocks = int((progress_percent / 100) * progress_bar_width)
+    empty_blocks = progress_bar_width - filled_blocks
+    progress_bar = ICONS.PROGRESS_FILLED * filled_blocks + ICONS.PROGRESS_EMPTY * empty_blocks
+    percentage_text = f"{int(progress_percent)}% {progress_bar}"
+    
+    title_available_width = max(10, available_width - len(percentage_text) - 6)
+    title_text = f"{reader.book_title[:title_available_width-3]}..." if len(reader.book_title) > title_available_width else reader.book_title
+    
+    used_space = len(title_text) + len(percentage_text) + 2
+    remaining_space = max(0, available_width - used_space - 6)
+    connecting_line = ICONS.LINE_SEPARATOR_SHORT * remaining_space
+    progress_text = f"{title_text} {connecting_line} {percentage_text}"
 
     # 1. Text Panel (Left)
     visible_lines = get_visible_content(reader)
     book_content = Text("")
     
-    constrained_lines = visible_lines[:panel_height - 4]
+    constrained_lines = visible_lines[:available_height]
     for i, line in enumerate(constrained_lines):
         book_content.append(line)
         if i < len(constrained_lines) - 1:
@@ -751,13 +769,14 @@ def render_split_view(reader, width, height):
         subtitle_align="center",
         padding=(1, 2),
         box=box.ROUNDED,
-        title=f"[{COLORS.PANEL_TITLE}]Reading[/{COLORS.PANEL_TITLE}]",
-        height=panel_height
+        title=f"[{COLORS.PANEL_TITLE}]{progress_text}[/{COLORS.PANEL_TITLE}]",
+        title_align="center",
+        height=effective_height
     ))
 
-    # 2. Chapters Panel (Right)
+    # 2. Chapters Panel (Right) - Espacement corrigé et titre harmonisé
     chapter_table = Table(box=None, show_header=False, padding=0, expand=True)
-    chapter_table.add_column("N°", width=3, style="dim")
+    chapter_table.add_column("N°", width=4, style="dim")
     chapter_table.add_column("Title", ratio=1, overflow="ellipsis")
 
     if not hasattr(reader, 'split_chapter_selection_idx'):
@@ -766,11 +785,11 @@ def render_split_view(reader, width, height):
     if not getattr(reader, "_cached_chapter_titles", None):
         chapters_cache = []
         for i, chapter in enumerate(reader.chapters):
-            title = f"Chapter {i + 1}"
+            title = f"Chapitre {i + 1}"
             if chapter and len(chapter) > 0:
                 first_line = chapter[0].strip()
                 if first_line and len(first_line) > 3:
-                    title = first_line[:25]
+                    title = first_line[:18]
             chapters_cache.append(title)
         reader._cached_chapter_titles = chapters_cache
 
@@ -781,22 +800,30 @@ def render_split_view(reader, width, height):
         if is_selected:
             style = "reverse bold cyan"
             marker = "› "
+            text_style = "reverse bold cyan"
         elif is_current:
             style = "bold cyan"
             marker = "▶ "
+            text_style = "bold cyan"
         else:
             style = COLORS.TEXT_NORMAL
             marker = "  "
+            text_style = "dim"
             
-        chapter_table.add_row(f"{marker}{i + 1}", Text(title, overflow="ellipsis"), style=style)
+        chapter_table.add_row(
+            f"{marker}{i + 1}.", 
+            Text(title, style=text_style, overflow="ellipsis"), 
+            style=style
+        )
 
     layout["chapters"].update(Panel(
         chapter_table,
-        title=f"[{COLORS.PANEL_TITLE}]Chapters[/{COLORS.PANEL_TITLE}]",
+        title=f"[{COLORS.PANEL_TITLE}]Sommaire[/{COLORS.PANEL_TITLE}]",
         border_style=COLORS.PANEL_BORDER,
         box=box.ROUNDED,
         padding=(1, 1),
-        height=panel_height
+        height=effective_height,
+        title_align="center"
     ))
 
     return layout
@@ -808,6 +835,10 @@ async def display_ui(reader):
     async with reader.render_lock:
         try:
             width, height = get_terminal_size()
+            
+            # Marge de sécurité globale pour éviter la troncature en haut (dock/menubar macOS)
+            effective_height = max(10, height - 2)
+            
             progress_percent = reader._calculate_ui_progress_percentage()
             rounded_scroll = round(reader.scroll_offset, 1)
             
@@ -815,7 +846,7 @@ async def display_ui(reader):
                 reader.ui_chapter_idx, reader.ui_paragraph_idx, reader.ui_sentence_idx,
                 getattr(reader, 'ui_word_idx', 0),
                 rounded_scroll, reader.is_paused, int(progress_percent),
-                width, height, reader.auto_scroll_enabled, reader.selection_active,
+                width, effective_height, reader.auto_scroll_enabled, reader.selection_active,
                 reader.selection_start, reader.selection_end,
                 reader.playback_speed, getattr(reader, 'speed_reading_enabled', False), config.UI_MODE,
                 reader.show_recent_menu, reader.recent_menu_selection_idx,
@@ -829,24 +860,24 @@ async def display_ui(reader):
             reader.last_terminal_size = (width, height)
             
             full_output = '\033[?25l\033[H'
-            temp_console = Console(width=width, height=height, force_terminal=True)
+            temp_console = Console(width=width, height=effective_height, force_terminal=True)
             
             # ==========================================================
-            # PRIORITÉ ABSOLUE : SPLIT VIEW (MODE 4)
+            # SPLIT VIEW (MODE 4)
             # ==========================================================
             if getattr(reader, 'split_view_enabled', False) or config.UI_MODE == 4:
-                split_output = render_split_view(reader, width, height)
+                split_output = render_split_view(reader, width, effective_height)
                 with temp_console.capture() as capture:
                     temp_console.print(split_output, end='', overflow='crop')
                 book_output = capture.get()
                 
             elif getattr(reader, 'speed_reading_enabled', False) or config.UI_MODE == 3:
-                book_output = render_speed_reading_output(reader, width, height, temp_console)
+                book_output = render_speed_reading_output(reader, width, effective_height, temp_console)
             else:
                 visible_lines = get_visible_content(reader)
                 if config.UI_MODE == 0:
                     padded_content = Text()
-                    for i in range(height):
+                    for i in range(effective_height):
                         if i < len(visible_lines):
                             line = visible_lines[i].copy()
                             pad_len = width - line.cell_len
@@ -855,7 +886,7 @@ async def display_ui(reader):
                             padded_content.append(line)
                         else:
                             padded_content.append(" " * width)
-                        if i < height - 1:
+                        if i < effective_height - 1:
                             padded_content.append("\n")
                     
                     with temp_console.capture() as capture:
@@ -893,7 +924,7 @@ async def display_ui(reader):
                         title_align="center",
                         subtitle_align="center",
                         width=width,
-                        height=height,
+                        height=effective_height,
                         expand=False
                     )
                     
@@ -901,28 +932,28 @@ async def display_ui(reader):
                         temp_console.print(book_panel, end='', overflow='crop')
                     book_output = capture.get()
                     output_lines = book_output.split('\n')
-                    if len(output_lines) > height:
-                        book_output = '\n'.join(output_lines[:height])
+                    if len(output_lines) > effective_height:
+                        book_output = '\n'.join(output_lines[:effective_height])
             
             full_output += book_output
             
             if reader.show_recent_menu:
-                menu_panel, panel_width, panel_height = render_recent_books_overlay(reader, width, height)
+                menu_panel, panel_width, panel_height = render_recent_books_overlay(reader, width, effective_height)
                 with temp_console.capture() as capture:
                     temp_console.print(menu_panel, end='', overflow='crop')
                 menu_lines = capture.get().split('\n')
-                start_y = (height - panel_height) // 2
+                start_y = (effective_height - panel_height) // 2
                 start_x = (width - panel_width) // 2
                 for i, line in enumerate(menu_lines):
                     if i >= panel_height: break
                     full_output += f"\033[{start_y + i + 1};{start_x + 1}H{line}"
 
             if reader.show_chapter_index:
-                chapter_panel, panel_width, panel_height = render_chapter_index_overlay(reader, width, height)
+                chapter_panel, panel_width, panel_height = render_chapter_index_overlay(reader, width, effective_height)
                 with temp_console.capture() as capture:
                     temp_console.print(chapter_panel, end='', overflow='crop')
                 chapter_lines = capture.get().split('\n')
-                start_y = (height - panel_height) // 2
+                start_y = (effective_height - panel_height) // 2
                 start_x = (width - panel_width) // 2
                 
                 reader.chapter_index_panel_y = start_y

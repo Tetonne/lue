@@ -6,6 +6,7 @@ import os
 import json
 import re
 import glob
+import tempfile
 from typing import Dict, Any, List, Optional, Tuple
 from . import config
 
@@ -39,6 +40,28 @@ def get_progress_file_path(book_title: str) -> str:
     """
     safe_title = COMPILED_SAFE_TITLE_REGEX.sub('', book_title)
     return os.path.join(config.PROGRESS_FILE_DIR, f"{safe_title}.progress.json")
+
+
+def _atomic_write_json(file_path: str, data: Dict[str, Any]) -> None:
+    """
+    Write JSON data atomically using a temporary file to prevent corruption.
+    """
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    dir_name = os.path.dirname(file_path)
+    
+    # Write to a temporary file in the same directory, then rename atomically
+    fd, temp_path = tempfile.mkstemp(dir=dir_name, text=True)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, file_path)
+    except Exception:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
 
 
 def load_progress(progress_file: str) -> Tuple[int, int, int]:
@@ -105,8 +128,7 @@ def save_progress(progress_file: str, chapter_idx: int, paragraph_idx: int, sent
         sentence_idx: Current sentence index
     """
     progress = {"c": chapter_idx, "p": paragraph_idx, "s": sentence_idx}
-    with open(progress_file, 'w', encoding='utf-8') as f:
-        json.dump(progress, f, indent=2)
+    _atomic_write_json(progress_file, progress)
 
 
 def save_extended_progress(
@@ -157,8 +179,7 @@ def save_extended_progress(
     if original_file_path is not None:
         progress["original_file_path"] = original_file_path
         
-    with open(progress_file, 'w', encoding='utf-8') as f:
-        json.dump(progress, f, indent=2)
+    _atomic_write_json(progress_file, progress)
 
 
 def get_recent_books(limit: int = 5) -> List[Dict[str, Any]]:
@@ -173,11 +194,19 @@ def get_recent_books(limit: int = 5) -> List[Dict[str, Any]]:
     """
     progress_files = glob.glob(os.path.join(config.PROGRESS_FILE_DIR, "*.progress.json"))
     
-    # Sort by modification time (newest first)
-    progress_files.sort(key=os.path.getmtime, reverse=True)
+    # Sort safely by modification time, ignoring files deleted during the process
+    valid_files = []
+    for pf in progress_files:
+        try:
+            mtime = os.path.getmtime(pf)
+            valid_files.append((pf, mtime))
+        except OSError:
+            continue
+            
+    valid_files.sort(key=lambda x: x[1], reverse=True)
     
     recent_books = []
-    for pf in progress_files:
+    for pf, _ in valid_files:
         if len(recent_books) >= limit:
             break
             
@@ -244,7 +273,18 @@ def find_most_recent_book() -> Optional[str]:
     if not progress_files:
         return None
     
-    most_recent_file = max(progress_files, key=os.path.getmtime)
+    # Safe max retrieval avoiding race conditions on file removal
+    valid_files = []
+    for pf in progress_files:
+        try:
+            valid_files.append((pf, os.path.getmtime(pf)))
+        except OSError:
+            continue
+            
+    if not valid_files:
+        return None
+        
+    most_recent_file = max(valid_files, key=lambda x: x[1])[0]
     
     try:
         with open(most_recent_file, 'r', encoding='utf-8') as f:

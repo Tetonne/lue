@@ -1,899 +1,938 @@
 """
-Intégration Moteur de Prosodie + Phonétisation IPA
-════════════════════════════════════════════════════════════════════════════════
-Combine le moteur de prosodie français optimisé avec la phonétisation IPA complète.
+Pipeline intégré Prosodie française + IPA.
 
-Fournit une analyse textuelle → IPA → prosodique en un seul pipeline.
+Architecture :
+    Texte
+      ↓
+    Prosodie française
+      ↓
+    IPA mot par mot
+      ↓
+    Liaisons / enchaînements inter-mots
+      ↓
+    Analyse enrichie
+      ↓
+    Export TTS / SSML
+
+IMPORTANT :
+- Le texte original n'est jamais modifié.
+- Les liaisons sont appliquées uniquement à la représentation phonétique.
+- Le FrenchPhoneticLinker reste dans phonetic_ipa.py.
+- Aucun nouveau module n'est nécessaire.
+- Le pipeline est résilient : une erreur IPA ne doit pas empêcher LUE de lire.
 """
 
+from __future__ import annotations
+
+import html
 import logging
-from typing import Optional, List, Dict, Union
+import re
+import time
 from dataclasses import dataclass, field
-from french_prosody import (
-    FrenchProsodyEngineAdvanced,
-    SpeechRegister,
+from typing import Dict, List, Optional, Union
+
+from .french_prosody import (
     BreathGroup,
+    SpeechRegister,
     PhoneticAnalysis as ProsodyAnalysis,
     get_french_prosody_engine,
 )
-from phonetic_ipa import (
+
+from .phonetic_ipa import (
     FrenchIPAPhoneticizer,
     IPAAnalysis,
     PhoneticSegment,
     get_ipa_phonetizer,
 )
 
+
 logger = logging.getLogger(__name__)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# STRUCTURES DE DONNÉES ENRICHIES
-# ════════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# STRUCTURES DE DONNÉES
+# ============================================================================
 
 @dataclass
 class EnrichedPhoneticSegment:
-    """Segment enrichi: graphème + IPA + prosodie."""
-    grapheme: str              # Lettres originales
-    ipa: str                   # Symboles IPA
-    syllable_number: int       # Numéro de syllabe
-    is_stressed: bool = False  # Accentuée dans la phrase?
-    emphasis_level: int = 0    # 0=normal, 1=léger, 2=fort
-    duration_ms: float = 0.0   # Durée estimée (pour future phase)
-    f0_base: float = 0.0       # Fréquence fondamentale estimée
+    """Segment phonétique enrichi avec informations prosodiques."""
+
+    grapheme: str
+    ipa: str
+    syllable_number: int
+
+    is_stressed: bool = False
+    emphasis_level: int = 0
+
+    duration_ms: float = 0.0
+    f0_base: float = 0.0
 
 
 @dataclass
 class FullPhoneticAnalysis:
-    """Analyse phonétique complète (IPA + Prosody + TTS-ready)."""
+    """Résultat complet du pipeline IPA + prosodie."""
+
     original_text: str
-    
-    # IPA
-    ipa_full: str
+
+    # IPA finale, après liaisons/enchaînements.
+    ipa_full: str = ""
+
+    # Segments issus du phonétiseur.
     ipa_segments: List[PhoneticSegment] = field(default_factory=list)
-    
-    # Prosodie
+
+    # Prosodie.
     processed_text: str = ""
     breath_groups: List[BreathGroup] = field(default_factory=list)
-    enriched_segments: List[EnrichedPhoneticSegment] = field(default_factory=list)
-    
-    # Métadonnées
+
+    enriched_segments: List[EnrichedPhoneticSegment] = field(
+        default_factory=list
+    )
+
+    # Métadonnées.
     syllable_count: int = 0
     word_count: int = 0
     nasal_count: int = 0
     uvular_r_count: int = 0
-    
-    # Timing
+
+    # Diagnostics.
     processing_time_ms: float = 0.0
     warnings: List[str] = field(default_factory=list)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# MOTEUR INTÉGRÉ
-# ════════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# PIPELINE
+# ============================================================================
 
 class ProsodyWithIPA:
     """
-    Pipeline intégré Texte → IPA → Prosodie → TTS.
-    
-    Combine phonétisation IPA avec prosodique française pour analyse complète.
+    Pipeline robuste :
+
+        texte
+          → prosodie
+          → segmentation
+          → IPA individuelle
+          → liaison/enchaînement
+          → export TTS
+
+    Le pipeline ne modifie jamais le texte affiché à l'utilisateur.
     """
-    
+
+    MAX_TEXT_LENGTH = 100_000
+
+    # Apostrophes typographiques reconnues.
+    APOSTROPHES = "'’ʼ`"
+
+    # Regex volontairement conservatrice :
+    # - conserve les apostrophes dans d'un, l'ancien, qu'il...
+    # - conserve les traits d'union dans dit-elle, États-Unis...
+    WORD_RE = re.compile(
+        r"[A-Za-zÀ-ÖØ-öø-ÿŒœÆæ]+(?:['’ʼ`][A-Za-zÀ-ÖØ-öø-ÿŒœÆæ]+)*"
+        r"(?:-[A-Za-zÀ-ÖØ-öø-ÿŒœÆæ]+(?:['’ʼ`][A-Za-zÀ-ÖØ-öø-ÿŒœÆæ]+)*)*",
+        re.UNICODE,
+    )
+
     def __init__(
         self,
         formal_mode: bool = True,
         register: SpeechRegister = SpeechRegister.STANDARD,
-        strict_mode: bool = False
+        strict_mode: bool = False,
     ):
-        """
-        Initialise le pipeline intégré.
-        
-        Args:
-            formal_mode: Mode formel (liaisons soutenues)
-            register: Registre de langue
-            strict_mode: Mode strict (exceptions vs warnings)
-        """
-        self.prosody_engine = get_french_prosody_engine(
-            formal_mode=formal_mode,
-            register=register,
-            strict_mode=strict_mode
-        )
-        self.ipa_phonetizer = get_ipa_phonetizer()
         self.formal_mode = formal_mode
         self.register = register
         self.strict_mode = strict_mode
-        
-        logger.info("Pipeline Prosodie+IPA initialisé")
-    
-    # ════════════════════════════════════════════════════════════════════
+
+        # Le moteur de prosodie est indépendant du phonétiseur.
+        self.prosody_engine = get_french_prosody_engine(
+            formal_mode=formal_mode,
+            register=register,
+            strict_mode=strict_mode,
+        )
+
+        # Le phonétiseur contient déjà le linker inter-mots.
+        self.ipa_phonetizer = get_ipa_phonetizer()
+
+        logger.info(
+            "Pipeline Prosody+IPA initialisé "
+            "(formal=%s, register=%s, strict=%s)",
+            formal_mode,
+            getattr(register, "value", register),
+            strict_mode,
+        )
+
+    # ========================================================================
     # ANALYSE COMPLÈTE
-    # ════════════════════════════════════════════════════════════════════
-    
+    # ========================================================================
+
     def analyze_full(self, text: str) -> FullPhoneticAnalysis:
         """
-        Analyse phonétique complète: IPA + Prosodie + Timing.
-        
-        Args:
-            text: Texte à analyser
-            
-        Returns:
-            Analyse enrichie avec tous les détails
-            
-        Example:
-            >>> pipeline = ProsodyWithIPA()
-            >>> analysis = pipeline.analyze_full("Bonjour, comment allez-vous?")
-            >>> print(analysis.ipa_full)
-            '/bɔ̃ʒuʁ kɔmɑ̃ alev-u/'
+        Analyse complète du texte.
+
+        Le traitement est volontairement découpé en étapes indépendantes
+        afin qu'une erreur de phonétisation ne fasse pas tomber toute la
+        chaîne TTS.
         """
-        try:
-            import time
-            start_time = time.time()
-            
-            if not text or not isinstance(text, str):
-                return FullPhoneticAnalysis(original_text=text)
-            
-            # 1. Analyse prosodique basique
-            prosody_result = self.prosody_engine.analyze_phonetics_complete(text)
-            processed = prosody_result.processed_text
-            
-            # 2. Phonétisation IPA par mot
-            words = text.lower().split()
-            ipa_results = []
-            all_segments = []
-            syllable_total = 0
-            
-            for word in words:
-                # Nettoie ponctuation
-                clean_word = self._clean_word(word)
-                if not clean_word:
-                    continue
-                
-                # Convertit en IPA
-                ipa = self.ipa_phonetizer._convert_word_to_ipa(clean_word)
-                analysis = self.ipa_phonetizer.analyze_complete(clean_word)
-                
-                ipa_results.append(f"/{ipa}/")
-                all_segments.extend(analysis.segments)
-                syllable_total += analysis.syllable_count
-            
-            ipa_full = ' '.join(ipa_results)
-            
-            # 3. Enrichit segments avec infos de prosodie
-            enriched_segments = self._enrich_segments(
-                all_segments,
-                prosody_result.breath_groups,
-                syllable_total
-            )
-            
-            # 4. Compte traits acoustiques
-            nasal_count = sum(1 for s in all_segments if '̃' in s.ipa)
-            uvular_r_count = sum(1 for s in all_segments if 'ʁ' in s.ipa)
-            
-            processing_time = (time.time() - start_time) * 1000
-            
-            # 5. Crée analyse complète
-            analysis = FullPhoneticAnalysis(
-                original_text=text,
-                ipa_full=ipa_full,
-                ipa_segments=all_segments,
-                processed_text=processed,
-                breath_groups=prosody_result.breath_groups,
-                enriched_segments=enriched_segments,
-                syllable_count=syllable_total,
-                word_count=len([w for w in words if self._clean_word(w)]),
-                nasal_count=nasal_count,
-                uvular_r_count=uvular_r_count,
-                processing_time_ms=processing_time,
-                warnings=prosody_result.warnings
-            )
-            
-            logger.info(f"Analyse complète: {analysis.word_count} mots, "
-                       f"{analysis.syllable_count} syllabes, {processing_time:.2f}ms")
-            
-            return analysis
-        
-        except Exception as e:
-            logger.error(f"Erreur analyse complète: {e}")
+
+        start_time = time.perf_counter()
+
+        if not isinstance(text, str):
+            message = "Le texte fourni n'est pas une chaîne."
+
             if self.strict_mode:
-                raise
+                raise TypeError(message)
+
+            return FullPhoneticAnalysis(
+                original_text="" if text is None else str(text),
+                warnings=[message],
+            )
+
+        if not text.strip():
             return FullPhoneticAnalysis(
                 original_text=text,
-                warnings=[str(e)]
+                processed_text="",
+                processing_time_ms=(
+                    time.perf_counter() - start_time
+                ) * 1000,
             )
-    
-    # ════════════════════════════════════════════════════════════════════
-    # EXPORT POUR TTS
-    # ════════════════════════════════════════════════════════════════════
-    
-    def export_ssml(self, text: str) -> str:
-        """
-        Exporte texte enrichi en SSML (Speech Synthesis Markup Language).
-        
-        Utile pour Edge-TTS et autres moteurs TTS.
-        
-        Args:
-            text: Texte à exporter
-            
-        Returns:
-            Markup SSML avec phonèmes, prosodique, etc.
-            
-        Example:
-            >>> ssml = pipeline.export_ssml("Bonjour!")
-            >>> print(ssml)
-            '<speak><prosody rate="1.0"><phoneme alphabet="ipa">/bɔ̃ʒuʁ/</phoneme></prosody></speak>'
-        """
-        try:
-            analysis = self.analyze_full(text)
-            
-            ssml_parts = ['<speak>']
-            
-            for group in analysis.breath_groups:
-                # Détermine rate et pitch selon intonation
-                rate = "1.0"
-                pitch = "0%"
-                
-                if group.emphasis_level == 2:
-                    rate = "0.9"  # Plus lent
-                    pitch = "+10%"
-                elif group.emphasis_level == 1:
-                    pitch = "+5%"
-                
-                ssml_parts.append(
-                    f'<prosody rate="{rate}" pitch="{pitch}">'
-                )
-                
-                # Ajoute phonèmes IPA
-                ipa_text = self.ipa_phonetizer._convert_word_to_ipa(group.text)
-                ssml_parts.append(
-                    f'<phoneme alphabet="ipa">{ipa_text}</phoneme>'
-                )
-                
-                # Pause selon ponctuation
-                if group.text.endswith(('!', '?')):
-                    ssml_parts.append('<break time="500ms"/>')
-                elif group.text.endswith(','):
-                    ssml_parts.append('<break time="200ms"/>')
-                
-                ssml_parts.append('</prosody>')
-            
-            ssml_parts.append('</speak>')
-            
-            ssml_result = ''.join(ssml_parts)
-            logger.debug(f"SSML généré: {len(ssml_result)} caractères")
-            
-            return ssml_result
-        
-        except Exception as e:
-            logger.error(f"Erreur export SSML: {e}")
-            if self.strict_mode:
-                raise
-            return ""
-    
-    def export_tts_compatible(self, text: str) -> Dict[str, Union[str, List]]:
-        """
-        Exporte données compatibles TTS (Edge, ElevenLabs, etc.).
-        
-        Args:
-            text: Texte source
-            
-        Returns:
-            Dict avec infos pour synthèse vocale
-            
-        Example:
-            >>> data = pipeline.export_tts_compatible("Bonjour")
-            >>> print(data)
-            {
-                'text': 'Bonjour',
-                'ipa': '/bɔ̃ʒuʁ/',
-                'ssml': '<speak>...',
-                'segments': [...],
-                'breath_groups': [...],
-                'metadata': {
-                    'syllables': 2,
-                    'language': 'fr-FR',
-                    'nasals': 1,
-                    'complexity': 'low'
-                }
-            }
-        """
-        try:
-            analysis = self.analyze_full(text)
-            
-            # Évalue complexité
-            complexity = self._assess_complexity(analysis)
-            
-            return {
-                'text': analysis.original_text,
-                'text_processed': analysis.processed_text,
-                'ipa': analysis.ipa_full,
-                'ssml': self.export_ssml(text),
-                'segments': [
-                    {
-                        'grapheme': s.grapheme,
-                        'ipa': s.ipa,
-                        'syllable': s.syllable_number,
-                        'stressed': s.is_stressed
-                    }
-                    for s in analysis.enriched_segments[:10]  # Top 10
-                ],
-                'breath_groups': [
-                    {
-                        'text': g.text,
-                        'intonation': g.intonation.value,
-                        'emphasis': g.emphasis_level,
-                        'syllables': g.syllable_count
-                    }
-                    for g in analysis.breath_groups
-                ],
-                'metadata': {
-                    'language': 'fr-FR',
-                    'syllables': analysis.syllable_count,
-                    'words': analysis.word_count,
-                    'nasals': analysis.nasal_count,
-                    'uvular_r': analysis.uvular_r_count,
-                    'complexity': complexity,
-                    'processing_time_ms': analysis.processing_time_ms
-                }
-            }
-        
-        except Exception as e:
-            logger.error(f"Erreur export TTS: {e}")
-            if self.strict_mode:
-                raise
-            return {}
-    
-    # ════════════════════════════════════════════════════════════════════
-    # MÉTHODES AUXILIAIRES
-    # ════════════════════════════════════════════════════════════════════
-    
-    def _clean_word(self, word: str) -> str:
-        """Enlève ponctuation d'un mot."""
-        import re
-        return re.sub(r'[^\w\']', '', word).lower()
-    
-    def _enrich_segments(
-        self,
-        segments: List[PhoneticSegment],
-        breath_groups: List[BreathGroup],
-        total_syllables: int
-    ) -> List[EnrichedPhoneticSegment]:
-        """Enrichit segments avec infos de prosodie."""
-        enriched = []
-        
-        for segment in segments:
-            # Cherche groupe de souffle contenant cette syllabe
-            group = None
-            for bg in breath_groups:
-                if segment.syllable_number <= bg.syllable_count:
-                    group = bg
-                    break
-            
-            enriched_seg = EnrichedPhoneticSegment(
-                grapheme=segment.grapheme,
-                ipa=segment.ipa,
-                syllable_number=segment.syllable_number,
-                is_stressed=group.emphasis_level > 0 if group else False,
-                emphasis_level=group.emphasis_level if group else 0,
+
+        if len(text) > self.MAX_TEXT_LENGTH:
+            message = (
+                f"Texte trop long ({len(text)} caractères, "
+                f"maximum {self.MAX_TEXT_LENGTH})."
             )
-            enriched.append(enriched_seg)
-        
-        return enriched
-    
-    def _assess_complexity(self, analysis: FullPhoneticAnalysis) -> str:
-        """Évalue complexité de prononciation."""
-        score = 0
-        
-        # Nasales (difficiles)
-        score += analysis.nasal_count * 1
-        
-        # R uvulaire (difficile pour non-natifs)
-        score += analysis.uvular_r_count * 0.5
-        
-        # Syllabes longues
-        score += analysis.syllable_count * 0.1
-        
-        if score <= 1:
-            return "very_easy"
-        elif score <= 2:
-            return "easy"
-        elif score <= 4:
-            return "medium"
-        elif score <= 6:
-            return "difficult"
-        else:
-            return "very_difficult"
 
+            if self.strict_mode:
+                raise ValueError(message)
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SINGLETON
-# ════════════════════════════════════════════════════════════════════════════════
+            logger.warning(message)
 
-_pipeline: Optional[ProsodyWithIPA] = None
+            text = text[: self.MAX_TEXT_LENGTH]
 
+        warnings: List[str] = []
 
-def get_prosody_ipa_pipeline(
-    formal_mode: bool = True,
-    register: SpeechRegister = SpeechRegister.STANDARD,
-    strict_mode: bool = False
-) -> ProsodyWithIPA:
-    """Obtient instance du pipeline (singleton)."""
-    global _pipeline
-    if _pipeline is None:
-        _pipeline = ProsodyWithIPA(
-            formal_mode=formal_mode,
-            register=register,
-            strict_mode=strict_mode
-        )
-    return _pipeline
+        # --------------------------------------------------------------------
+        # 1. PROSODIE
+        # --------------------------------------------------------------------
 
+        prosody_result = self._analyze_prosody(text, warnings)
 
-# ════════════════════════════════════════════════════════════════════════════════
-# TESTS
-# ════════════════════════════════════════════════════════════════════════════════
+        processed_text = prosody_result.processed_text
+        breath_groups = prosody_result.breath_groups
 
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║       Pipeline Prosodie + IPA - Tests Intégrés                   ║")
-    print("╚══════════════════════════════════════════════════════════════════╝\n")
-    
-    try:
-        pipeline = get_prosody_ipa_pipeline(
-            formal_mode=True,
-            register=SpeechRegister.FORMAL
-        )
-        
-        test_phrases = [
-            "Bonjour, comment allez-vous?",
-            "Extraordinaire, vraiment!",
-            "Depuis 1789, les progrès sont constants.",
-            "Monsieur Dupont parle français couramment.",
-        ]
-        
-        print("ANALYSES COMPLÈTES (IPA + Prosodie):\n")
-        print("=" * 80)
-        
-        for phrase in test_phrases:
+        # --------------------------------------------------------------------
+        # 2. SEGMENTATION
+        # --------------------------------------------------------------------
+
+        words = self._extract_words(text)
+
+        if not words:
+            warnings.append("Aucun mot exploitable trouvé dans le texte.")
+
+            return FullPhoneticAnalysis(
+                original_text=text,
+                processed_text=processed_text,
+                breath_groups=breath_groups,
+                warnings=warnings,
+                processing_time_ms=(
+                    time.perf_counter() - start_time
+                ) * 1000,
+            )
+
+        # --------------------------------------------------------------------
+        # 3. IPA MOT PAR MOT
+        # --------------------------------------------------------------------
+
+        word_ipas: List[str] = []
+        analyses: List[IPAAnalysis] = []
+        all_segments: List[PhoneticSegment] = []
+
+        for word in words:
             try:
-                print(f"\n📄 Phrase: {phrase}")
-                
-                # Analyse complète
-                analysis = pipeline.analyze_full(phrase)
-                
-                print(f"   IPA: {analysis.ipa_full}")
-                print(f"   Traité: {analysis.processed_text}")
-                print(f"   Mots: {analysis.word_count}, Syllabes: {analysis.syllable_count}")
-                print(f"   Nasales: {analysis.nasal_count}, R-uvulaire: {analysis.uvular_r_count}")
-                print(f"   Temps: {analysis.processing_time_ms:.2f}ms")
-                
-                # Export SSML
-                ssml = pipeline.export_ssml(phrase)
-                print(f"   SSML: {ssml[:80]}...")
-                
-                # Export TTS
-                tts_data = pipeline.export_tts_compatible(phrase)
-                if tts_data:
-                    print(f"   Complexité: {tts_data['metadata']['complexity']}")
-                
-            except Exception as e:
-                print(f"❌ Erreur: {e}")
-        
-        print("\n" + "=" * 80)
-        print("\n✓ Tests d'intégration terminés avec succès!")
-        print("✓ Pipeline prêt pour synthèse vocale Edge-TTS.\n")
-    
-    except Exception as e:
-        print(f"❌ Erreur fatale: {e}")
-        logger.exception("Erreur dans les tests")
-    """Segment enrichi: graphème + IPA + prosodie."""
-    grapheme: str              # Lettres originales
-    ipa: str                   # Symboles IPA
-    syllable_number: int       # Numéro de syllabe
-    is_stressed: bool = False  # Accentuée dans la phrase?
-    emphasis_level: int = 0    # 0=normal, 1=léger, 2=fort
-    duration_ms: float = 0.0   # Durée estimée (pour future phase)
-    f0_base: float = 0.0       # Fréquence fondamentale estimée
-
-
-@dataclass
-class FullPhoneticAnalysis:
-    """Analyse phonétique complète (IPA + Prosody + TTS-ready)."""
-    original_text: str
-    
-    # IPA
-    ipa_full: str
-    ipa_segments: List[PhoneticSegment] = field(default_factory=list)
-    
-    # Prosodie
-    processed_text: str = ""
-    breath_groups: List[BreathGroup] = field(default_factory=list)
-    enriched_segments: List[EnrichedPhoneticSegment] = field(default_factory=list)
-    
-    # Métadonnées
-    syllable_count: int = 0
-    word_count: int = 0
-    nasal_count: int = 0
-    uvular_r_count: int = 0
-    
-    # Timing
-    processing_time_ms: float = 0.0
-    warnings: List[str] = field(default_factory=list)
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-# MOTEUR INTÉGRÉ
-# ════════════════════════════════════════════════════════════════════════════════
-
-class ProsodyWithIPA:
-    """
-    Pipeline intégré Texte → IPA → Prosodie → TTS.
-    
-    Combine phonétisation IPA avec prosodique française pour analyse complète.
-    """
-    
-    def __init__(
-        self,
-        formal_mode: bool = True,
-        register: SpeechRegister = SpeechRegister.STANDARD,
-        strict_mode: bool = False
-    ):
-        """
-        Initialise le pipeline intégré.
-        
-        Args:
-            formal_mode: Mode formel (liaisons soutenues)
-            register: Registre de langue
-            strict_mode: Mode strict (exceptions vs warnings)
-        """
-        self.prosody_engine = get_french_prosody_engine(
-            formal_mode=formal_mode,
-            register=register,
-            strict_mode=strict_mode
-        )
-        self.ipa_phonetizer = get_ipa_phonetizer()
-        self.formal_mode = formal_mode
-        self.register = register
-        self.strict_mode = strict_mode
-        
-        logger.info("Pipeline Prosodie+IPA initialisé")
-    
-    # ════════════════════════════════════════════════════════════════════
-    # ANALYSE COMPLÈTE
-    # ════════════════════════════════════════════════════════════════════
-    
-    def analyze_full(self, text: str) -> FullPhoneticAnalysis:
-        """
-        Analyse phonétique complète: IPA + Prosodie + Timing.
-        
-        Args:
-            text: Texte à analyser
-            
-        Returns:
-            Analyse enrichie avec tous les détails
-            
-        Example:
-            >>> pipeline = ProsodyWithIPA()
-            >>> analysis = pipeline.analyze_full("Bonjour, comment allez-vous?")
-            >>> print(analysis.ipa_full)
-            '/bɔ̃ʒuʁ kɔmɑ̃ alev-u/'
-        """
-        try:
-            import time
-            start_time = time.time()
-            
-            if not text or not isinstance(text, str):
-                return FullPhoneticAnalysis(original_text=text)
-            
-            # 1. Analyse prosodique basique
-            prosody_result = self.prosody_engine.analyze_phonetics_complete(text)
-            processed = prosody_result.processed_text
-            
-            # 2. Phonétisation IPA inter-mots
-            raw_words = text.lower().split()
-
-            words = []
-            for word in raw_words:
-                clean_word = self._clean_word(word)
-                if clean_word:
-                    words.append(clean_word)
-
-            if not words:
-                return FullPhoneticAnalysis(
-                    original_text=text,
-                    processed_text=processed
-                )
-
-            # IPA individuelle
-            word_ipas = []
-            analyses = []
-
-            for word in words:
                 ipa = self.ipa_phonetizer._convert_word_to_ipa(word)
-                analysis = self.ipa_phonetizer.analyze_complete(word)
+
+                word_analysis = self.ipa_phonetizer.analyze_complete(word)
+
+                # Le phonétiseur peut retourner une IPA vide sur un cas
+                # inconnu. On conserve alors le mot sans faire tomber
+                # toute la phrase.
+                if not ipa:
+                    warnings.append(
+                        f"IPA vide pour le mot : {word!r}"
+                    )
+                    ipa = ""
 
                 word_ipas.append(ipa)
-                analyses.append(analysis)
+                analyses.append(word_analysis)
 
+                if word_analysis.segments:
+                    all_segments.extend(word_analysis.segments)
 
-            linker = FrenchPhoneticLinker()
-            linked_ipas = linker.link_words(words, word_ipas)
+            except Exception as exc:
+                message = (
+                    f"Échec IPA pour {word!r}: {exc}"
+                )
 
-            print("=== IPA LINKER ===")
-            print("WORDS :", words)
-            print("BEFORE:", word_ipas)
-            print("AFTER :", linked_ipas)
-            print("==================")
+                logger.warning(message, exc_info=True)
+                warnings.append(message)
 
+                # Important :
+                # conserver l'alignement words ↔ word_ipas.
+                word_ipas.append("")
+                analyses.append(
+                    IPAAnalysis(
+                        original_text=word,
+                        ipa_full="",
+                    )
+                )
 
+        # --------------------------------------------------------------------
+        # 4. LIAISONS / ENCHAÎNEMENTS
+        # --------------------------------------------------------------------
 
+        linked_ipas = self._apply_interword_linking(
+            words=words,
+            word_ipas=word_ipas,
+            warnings=warnings,
+        )
 
-            ipa_results = [
-                f"/{ipa}/"
-                for ipa in linked_ipas
-            ]
+        # --------------------------------------------------------------------
+        # 5. IPA FINALE
+        # --------------------------------------------------------------------
 
-            ipa_full = " ".join(ipa_results)
+        ipa_full = self._build_ipa_full(
+            words=words,
+            linked_ipas=linked_ipas,
+        )
 
-            # Segments IPA unitaires conservés pour les métadonnées/timing.
-            all_segments = []
-            syllable_total = 0
+        # --------------------------------------------------------------------
+        # 6. MÉTADONNÉES
+        # --------------------------------------------------------------------
 
-            for analysis in analyses:
-                all_segments.extend(analysis.segments)
-                syllable_total += analysis.syllable_count
-            
-            # 3. Enrichit segments avec infos de prosodie
-            enriched_segments = self._enrich_segments(
-                all_segments,
-                prosody_result.breath_groups,
-                syllable_total
+        syllable_total = sum(
+            analysis.syllable_count
+            for analysis in analyses
+            if analysis.syllable_count
+        )
+
+        nasal_count = sum(
+            1
+            for segment in all_segments
+            if "̃" in segment.ipa
+        )
+
+        uvular_r_count = sum(
+            1
+            for segment in all_segments
+            if "ʁ" in segment.ipa
+        )
+
+        # --------------------------------------------------------------------
+        # 7. ENRICHISSEMENT PROSODIQUE
+        # --------------------------------------------------------------------
+
+        enriched_segments = self._enrich_segments(
+            all_segments,
+            breath_groups,
+            syllable_total,
+        )
+
+        processing_time_ms = (
+            time.perf_counter() - start_time
+        ) * 1000
+
+        result = FullPhoneticAnalysis(
+            original_text=text,
+            ipa_full=ipa_full,
+            ipa_segments=all_segments,
+            processed_text=processed_text,
+            breath_groups=breath_groups,
+            enriched_segments=enriched_segments,
+            syllable_count=syllable_total,
+            word_count=len(words),
+            nasal_count=nasal_count,
+            uvular_r_count=uvular_r_count,
+            processing_time_ms=processing_time_ms,
+            warnings=warnings,
+        )
+
+        logger.debug(
+            "IPA final : %s",
+            ipa_full,
+        )
+
+        logger.info(
+            "Analyse IPA complète : %d mots, %d syllabes, "
+            "%.2f ms, %d avertissements",
+            result.word_count,
+            result.syllable_count,
+            result.processing_time_ms,
+            len(result.warnings),
+        )
+
+        return result
+
+    # ========================================================================
+    # PROSODIE
+    # ========================================================================
+
+    def _analyze_prosody(
+        self,
+        text: str,
+        warnings: List[str],
+    ) -> ProsodyAnalysis:
+        """Analyse prosodique avec fallback résilient."""
+
+        try:
+            result = self.prosody_engine.analyze_phonetics_complete(text)
+
+            if result is None:
+                warnings.append(
+                    "Le moteur de prosodie n'a retourné aucun résultat."
+                )
+
+                return ProsodyAnalysis(
+                    original_text=text,
+                    processed_text=text,
+                    warnings=[
+                        "Résultat prosodique vide."
+                    ],
+                )
+
+            if result.warnings:
+                warnings.extend(result.warnings)
+
+            return result
+
+        except Exception as exc:
+            message = (
+                f"Échec du moteur prosodique : {exc}"
             )
-            
-            # 4. Compte traits acoustiques
-            nasal_count = sum(1 for s in all_segments if '̃' in s.ipa)
-            uvular_r_count = sum(1 for s in all_segments if 'ʁ' in s.ipa)
-            
-            processing_time = (time.time() - start_time) * 1000
-            
-            # 5. Crée analyse complète
-            analysis = FullPhoneticAnalysis(
-                original_text=text,
-                ipa_full=ipa_full,
-                ipa_segments=all_segments,
-                processed_text=processed,
-                breath_groups=prosody_result.breath_groups,
-                enriched_segments=enriched_segments,
-                syllable_count=syllable_total,
-                word_count=len([w for w in words if self._clean_word(w)]),
-                nasal_count=nasal_count,
-                uvular_r_count=uvular_r_count,
-                processing_time_ms=processing_time,
-                warnings=prosody_result.warnings
-            )
-            
-            logger.info(f"Analyse complète: {analysis.word_count} mots, "
-                       f"{analysis.syllable_count} syllabes, {processing_time:.2f}ms")
-            
-            return analysis
-        
-        except Exception as e:
-            logger.error(f"Erreur analyse complète: {e}")
+
+            logger.warning(message, exc_info=True)
+            warnings.append(message)
+
             if self.strict_mode:
                 raise
-            return FullPhoneticAnalysis(
+
+            # Fallback minimal : le texte original reste exploitable
+            # par le TTS.
+            return ProsodyAnalysis(
                 original_text=text,
-                warnings=[str(e)]
+                processed_text=text,
+                breath_groups=[],
+                warnings=[message],
             )
-    
-    # ════════════════════════════════════════════════════════════════════
-    # EXPORT POUR TTS
-    # ════════════════════════════════════════════════════════════════════
-    
+
+    # ========================================================================
+    # SEGMENTATION
+    # ========================================================================
+
+    def _extract_words(self, text: str) -> List[str]:
+        """
+        Extrait les unités lexicales sans perdre apostrophes et traits
+        d'union nécessaires au traitement phonétique.
+
+        Exemples :
+
+            d'un ancien
+            → ["d'un", "ancien"]
+
+            dit-elle
+            → ["dit-elle"]
+
+            États-Unis
+            → ["États-Unis"]
+        """
+
+        normalized = text.replace("’", "'")
+
+        return [
+            match.group(0).lower()
+            for match in self.WORD_RE.finditer(normalized)
+        ]
+
+    # ========================================================================
+    # LIAISONS
+    # ========================================================================
+
+    def _apply_interword_linking(
+        self,
+        words: List[str],
+        word_ipas: List[str],
+        warnings: List[str],
+    ) -> List[str]:
+        """
+        Applique le linker déjà présent dans phonetic_ipa.py.
+
+        C'est ici que se produisent notamment :
+
+            comment + allez
+                → kɔmɑ̃‿t
+
+            les + États
+                → le‿z
+
+            d'un + ancien
+                → dœ̃‿n
+
+            dit-elle
+                → di‿t ɛl
+        """
+
+        if not words:
+            return []
+
+        if len(words) != len(word_ipas):
+            message = (
+                "Désalignement words/IPA : "
+                f"{len(words)} mots contre {len(word_ipas)} IPA."
+            )
+
+            logger.error(message)
+            warnings.append(message)
+
+            # Ne jamais tenter une transformation sur des listes
+            # désalignées.
+            return list(word_ipas)
+
+        try:
+            linked = self.ipa_phonetizer.link_words(
+                words,
+                word_ipas,
+            )
+
+            if not isinstance(linked, list):
+                raise TypeError(
+                    "link_words() n'a pas retourné une liste."
+                )
+
+            if len(linked) != len(words):
+                raise ValueError(
+                    "link_words() a modifié le nombre d'unités."
+                )
+
+            # Diagnostic explicite uniquement lorsqu'une liaison a
+            # effectivement modifié l'IPA.
+            for word, before, after in zip(
+                words,
+                word_ipas,
+                linked,
+            ):
+                if before != after:
+                    logger.debug(
+                        "Liaison/enchaînement : %s : %s → %s",
+                        word,
+                        before,
+                        after,
+                    )
+
+            return linked
+
+        except Exception as exc:
+            message = (
+                f"Échec du linker phonétique : {exc}"
+            )
+
+            logger.warning(message, exc_info=True)
+            warnings.append(message)
+
+            if self.strict_mode:
+                raise
+
+            # Résilience : on conserve l'IPA individuelle.
+            return list(word_ipas)
+
+    # ========================================================================
+    # CONSTRUCTION IPA
+    # ========================================================================
+
+    def _build_ipa_full(
+        self,
+        words: List[str],
+        linked_ipas: List[str],
+    ) -> str:
+        """
+        Construit la transcription IPA finale.
+
+        Les unités vides sont ignorées afin d'éviter :
+            // ou espaces multiples.
+        """
+
+        parts = []
+
+        for ipa in linked_ipas:
+            if not ipa:
+                continue
+
+            cleaned = ipa.strip()
+
+            if cleaned:
+                parts.append(cleaned)
+
+        return " ".join(parts)
+
+    # ========================================================================
+    # SSML
+    # ========================================================================
+
     def export_ssml(self, text: str) -> str:
         """
-        Exporte texte enrichi en SSML (Speech Synthesis Markup Language).
-        
-        Utile pour Edge-TTS et autres moteurs TTS.
-        
-        Args:
-            text: Texte à exporter
-            
-        Returns:
-            Markup SSML avec phonèmes, prosodique, etc.
-            
-        Example:
-            >>> ssml = pipeline.export_ssml("Bonjour!")
-            >>> print(ssml)
-            '<speak><prosody rate="1.0"><phoneme alphabet="ipa">/bɔ̃ʒuʁ/</phoneme></prosody></speak>'
+        Exporte une représentation SSML.
+
+        IMPORTANT :
+        on utilise l'analyse déjà calculée. On ne reconvertit PAS chaque
+        groupe avec _convert_word_to_ipa(), sinon les liaisons calculées
+        précédemment seraient perdues.
+
+        Le texte original est conservé dans les phonèmes afin de permettre
+        au moteur TTS de conserver une relation lisible entre texte et IPA.
         """
+
         try:
             analysis = self.analyze_full(text)
-            
-            ssml_parts = ['<speak>']
-            
+
+            if not analysis.original_text.strip():
+                return "<speak></speak>"
+
+            ssml_parts = [
+                '<speak version="1.0" '
+                'xmlns="http://www.w3.org/2001/10/synthesis" '
+                'xml:lang="fr-FR">'
+            ]
+
+            # Si aucun groupe de souffle n'a été détecté, fallback propre.
+            if not analysis.breath_groups:
+                escaped_text = html.escape(
+                    analysis.original_text
+                )
+
+                ssml_parts.append(
+                    f"<prosody>{escaped_text}</prosody>"
+                )
+                ssml_parts.append("</speak>")
+
+                return "".join(ssml_parts)
+
+            # ----------------------------------------------------------------
+            # IMPORTANT :
+            # Le moteur actuel ne fournit pas encore un mapping fiable
+            # groupe de souffle → tranche exacte de l'IPA finale.
+            #
+            # On utilise donc ici le texte prosodique pour les groupes et
+            # l'IPA globale comme information diagnostique, plutôt que de
+            # fabriquer une fausse correspondance phonème/groupe.
+            # ----------------------------------------------------------------
+
+            # Pour le moment, une seule unité phonétique globale est plus
+            # fiable qu'une série de phonèmes mal alignés.
+            ipa_value = analysis.ipa_full.strip()
+
             for group in analysis.breath_groups:
-                # Détermine rate et pitch selon intonation
                 rate = "1.0"
                 pitch = "0%"
-                
+
                 if group.emphasis_level == 2:
-                    rate = "0.9"  # Plus lent
+                    rate = "0.90"
                     pitch = "+10%"
                 elif group.emphasis_level == 1:
                     pitch = "+5%"
-                
+
+                group_text = html.escape(
+                    group.text.strip()
+                )
+
+                if not group_text:
+                    continue
+
                 ssml_parts.append(
                     f'<prosody rate="{rate}" pitch="{pitch}">'
                 )
-                
-                # Ajoute phonèmes IPA
-                ipa_text = self.ipa_phonetizer._convert_word_to_ipa(group.text)
-                ssml_parts.append(
-                    f'<phoneme alphabet="ipa">{ipa_text}</phoneme>'
-                )
-                
-                # Pause selon ponctuation
-                if group.text.endswith(('!', '?')):
-                    ssml_parts.append('<break time="500ms"/>')
-                elif group.text.endswith(','):
-                    ssml_parts.append('<break time="200ms"/>')
-                
-                ssml_parts.append('</prosody>')
-            
-            ssml_parts.append('</speak>')
-            
-            ssml_result = ''.join(ssml_parts)
-            logger.debug(f"SSML généré: {len(ssml_result)} caractères")
-            
-            return ssml_result
-        
-        except Exception as e:
-            logger.error(f"Erreur export SSML: {e}")
+
+                # Nous n'injectons l'IPA que si elle est disponible.
+                #
+                # Pour éviter de casser le moteur avec une IPA vide,
+                # on garde le texte comme fallback.
+                if ipa_value:
+                    # IPA XML-safe.
+                    safe_ipa = html.escape(
+                        ipa_value,
+                        quote=True,
+                    )
+
+                    safe_text = html.escape(
+                        group.text.strip()
+                    )
+
+                    ssml_parts.append(
+                        '<phoneme alphabet="ipa" '
+                        f'ph="{safe_ipa}">'
+                        f"{safe_text}"
+                        "</phoneme>"
+                    )
+                else:
+                    ssml_parts.append(group_text)
+
+                if group.text.rstrip().endswith(("!", "?")):
+                    ssml_parts.append(
+                        '<break time="500ms"/>'
+                    )
+                elif group.text.rstrip().endswith(","):
+                    ssml_parts.append(
+                        '<break time="200ms"/>'
+                    )
+
+                ssml_parts.append("</prosody>")
+
+            ssml_parts.append("</speak>")
+
+            return "".join(ssml_parts)
+
+        except Exception as exc:
+            logger.error(
+                "Erreur export SSML : %s",
+                exc,
+                exc_info=True,
+            )
+
             if self.strict_mode:
                 raise
-            return ""
-    
-    def export_tts_compatible(self, text: str) -> Dict[str, Union[str, List]]:
+
+            # Fallback le plus sûr : texte brut.
+            return html.escape(text or "")
+
+    # ========================================================================
+    # EXPORT TTS
+    # ========================================================================
+
+    def export_tts_compatible(
+        self,
+        text: str,
+    ) -> Dict[str, Union[str, List, Dict]]:
         """
-        Exporte données compatibles TTS (Edge, ElevenLabs, etc.).
-        
-        Args:
-            text: Texte source
-            
-        Returns:
-            Dict avec infos pour synthèse vocale
-            
-        Example:
-            >>> data = pipeline.export_tts_compatible("Bonjour")
-            >>> print(data)
-            {
-                'text': 'Bonjour',
-                'ipa': '/bɔ̃ʒuʁ/',
-                'ssml': '<speak>...',
-                'segments': [...],
-                'breath_groups': [...],
-                'metadata': {
-                    'syllables': 2,
-                    'language': 'fr-FR',
-                    'nasals': 1,
-                    'complexity': 'low'
-                }
-            }
+        Retourne les données consommables par le reste de LUE.
+
+        L'interface reste compatible avec reader.py :
+
+            data["ssml"]
+            data["text"]
+            data["processed_text"]
+            data["ipa"]
         """
+
         try:
             analysis = self.analyze_full(text)
-            
-            # Évalue complexité
-            complexity = self._assess_complexity(analysis)
-            
+
+            complexity = self._assess_complexity(
+                analysis
+            )
+
+            ssml = self.export_ssml(
+                analysis.original_text
+            )
+
             return {
-                'text': analysis.original_text,
-                'text_processed': analysis.processed_text,
-                'ipa': analysis.ipa_full,
-                'ssml': self.export_ssml(text),
-                'segments': [
+                "text": analysis.original_text,
+
+                "text_processed": (
+                    analysis.processed_text
+                    or analysis.original_text
+                ),
+
+                "processed_text": (
+                    analysis.processed_text
+                    or analysis.original_text
+                ),
+
+                "ipa": analysis.ipa_full,
+
+                "ssml": ssml,
+
+                "segments": [
                     {
-                        'grapheme': s.grapheme,
-                        'ipa': s.ipa,
-                        'syllable': s.syllable_number,
-                        'stressed': s.is_stressed
+                        "grapheme": segment.grapheme,
+                        "ipa": segment.ipa,
+                        "syllable": segment.syllable_number,
+                        "stressed": segment.is_stressed,
                     }
-                    for s in analysis.enriched_segments[:10]  # Top 10
+                    for segment in analysis.enriched_segments[:50]
                 ],
-                'breath_groups': [
+
+                "breath_groups": [
                     {
-                        'text': g.text,
-                        'intonation': g.intonation.value,
-                        'emphasis': g.emphasis_level,
-                        'syllables': g.syllable_count
+                        "text": group.text,
+                        "intonation": getattr(
+                            group.intonation,
+                            "value",
+                            str(group.intonation),
+                        ),
+                        "emphasis": group.emphasis_level,
+                        "syllables": group.syllable_count,
                     }
-                    for g in analysis.breath_groups
+                    for group in analysis.breath_groups
                 ],
-                'metadata': {
-                    'language': 'fr-FR',
-                    'syllables': analysis.syllable_count,
-                    'words': analysis.word_count,
-                    'nasals': analysis.nasal_count,
-                    'uvular_r': analysis.uvular_r_count,
-                    'complexity': complexity,
-                    'processing_time_ms': analysis.processing_time_ms
-                }
+
+                "metadata": {
+                    "language": "fr-FR",
+                    "syllables": analysis.syllable_count,
+                    "words": analysis.word_count,
+                    "nasals": analysis.nasal_count,
+                    "uvular_r": analysis.uvular_r_count,
+                    "complexity": complexity,
+                    "processing_time_ms": (
+                        analysis.processing_time_ms
+                    ),
+                    "warnings": list(analysis.warnings),
+                    "ipa_linking_enabled": True,
+                },
             }
-        
-        except Exception as e:
-            logger.error(f"Erreur export TTS: {e}")
+
+        except Exception as exc:
+            logger.error(
+                "Erreur export TTS : %s",
+                exc,
+                exc_info=True,
+            )
+
             if self.strict_mode:
                 raise
-            return {}
-    
-    # ════════════════════════════════════════════════════════════════════
-    # MÉTHODES AUXILIAIRES
-    # ════════════════════════════════════════════════════════════════════
-    
-    def _clean_word(self, word: str) -> str:
-        """Enlève ponctuation d'un mot."""
-        import re
-        return re.sub(r'[^\w\']', '', word).lower()
-    
+
+            # Interface de fallback compatible avec reader.py.
+            return {
+                "text": text or "",
+                "text_processed": text or "",
+                "processed_text": text or "",
+                "ipa": "",
+                "ssml": html.escape(text or ""),
+                "segments": [],
+                "breath_groups": [],
+                "metadata": {
+                    "language": "fr-FR",
+                    "syllables": 0,
+                    "words": 0,
+                    "nasals": 0,
+                    "uvular_r": 0,
+                    "complexity": "unknown",
+                    "processing_time_ms": 0.0,
+                    "warnings": [str(exc)],
+                    "ipa_linking_enabled": False,
+                },
+            }
+
+    # ========================================================================
+    # SEGMENTS / PROSODIE
+    # ========================================================================
+
     def _enrich_segments(
         self,
         segments: List[PhoneticSegment],
         breath_groups: List[BreathGroup],
-        total_syllables: int
+        total_syllables: int,
     ) -> List[EnrichedPhoneticSegment]:
-        """Enrichit segments avec infos de prosodie."""
-        enriched = []
-        
-        for segment in segments:
-            # Cherche groupe de souffle contenant cette syllabe
-            group = None
-            for bg in breath_groups:
-                if segment.syllable_number <= bg.syllable_count:
-                    group = bg
-                    break
-            
-            enriched_seg = EnrichedPhoneticSegment(
-                grapheme=segment.grapheme,
-                ipa=segment.ipa,
-                syllable_number=segment.syllable_number,
-                is_stressed=group.emphasis_level > 0 if group else False,
-                emphasis_level=group.emphasis_level if group else 0,
+        """
+        Enrichit les segments phonétiques avec les informations prosodiques.
+
+        Le mapping reste volontairement prudent : sans mapping caractère →
+        syllabe fourni par le moteur de prosodie, on ne prétend pas calculer
+        un alignement parfait.
+        """
+
+        enriched: List[EnrichedPhoneticSegment] = []
+
+        if not segments:
+            return enriched
+
+        # Construire les bornes cumulées des groupes.
+        cumulative_groups = []
+        cumulative = 0
+
+        for group in breath_groups:
+            start = cumulative + 1
+            cumulative += max(
+                0,
+                int(group.syllable_count or 0),
             )
-            enriched.append(enriched_seg)
-        
+
+            cumulative_groups.append(
+                (start, cumulative, group)
+            )
+
+        for segment in segments:
+            group = self._find_group_for_syllable(
+                segment.syllable_number,
+                cumulative_groups,
+            )
+
+            enriched.append(
+                EnrichedPhoneticSegment(
+                    grapheme=segment.grapheme,
+                    ipa=segment.ipa,
+                    syllable_number=segment.syllable_number,
+                    is_stressed=bool(
+                        group and group.emphasis_level > 0
+                    ),
+                    emphasis_level=(
+                        group.emphasis_level
+                        if group
+                        else 0
+                    ),
+                )
+            )
+
         return enriched
-    
-    def _assess_complexity(self, analysis: FullPhoneticAnalysis) -> str:
-        """Évalue complexité de prononciation."""
-        score = 0
-        
-        # Nasales (difficiles)
-        score += analysis.nasal_count * 1
-        
-        # R uvulaire (difficile pour non-natifs)
+
+    @staticmethod
+    def _find_group_for_syllable(
+        syllable_number: int,
+        cumulative_groups,
+    ) -> Optional[BreathGroup]:
+        """Trouve prudemment le groupe correspondant à une syllabe."""
+
+        for start, end, group in cumulative_groups:
+            if start <= syllable_number <= end:
+                return group
+
+        return None
+
+    # ========================================================================
+    # COMPLEXITÉ
+    # ========================================================================
+
+    def _assess_complexity(
+        self,
+        analysis: FullPhoneticAnalysis,
+    ) -> str:
+        """Évalue grossièrement la complexité phonétique."""
+
+        score = 0.0
+
+        score += analysis.nasal_count * 1.0
         score += analysis.uvular_r_count * 0.5
-        
-        # Syllabes longues
         score += analysis.syllable_count * 0.1
-        
+
+        # Les avertissements augmentent légèrement le niveau de complexité,
+        # sans rendre l'évaluation artificiellement énorme.
+        score += min(
+            len(analysis.warnings) * 0.5,
+            3.0,
+        )
+
         if score <= 1:
             return "very_easy"
-        elif score <= 2:
+
+        if score <= 2:
             return "easy"
-        elif score <= 4:
+
+        if score <= 4:
             return "medium"
-        elif score <= 6:
+
+        if score <= 6:
             return "difficult"
-        else:
-            return "very_difficult"
+
+        return "very_difficult"
 
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 # SINGLETON
-# ════════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 _pipeline: Optional[ProsodyWithIPA] = None
 
@@ -901,78 +940,98 @@ _pipeline: Optional[ProsodyWithIPA] = None
 def get_prosody_ipa_pipeline(
     formal_mode: bool = True,
     register: SpeechRegister = SpeechRegister.STANDARD,
-    strict_mode: bool = False
+    strict_mode: bool = False,
 ) -> ProsodyWithIPA:
-    """Obtient instance du pipeline (singleton)."""
+    """
+    Retourne l'instance singleton du pipeline.
+
+    Le singleton est pratique pour LUE car les dictionnaires du phonétiseur
+    sont coûteux à initialiser.
+    """
+
     global _pipeline
+
     if _pipeline is None:
         _pipeline = ProsodyWithIPA(
             formal_mode=formal_mode,
             register=register,
-            strict_mode=strict_mode
+            strict_mode=strict_mode,
         )
+
     return _pipeline
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# TESTS
-# ════════════════════════════════════════════════════════════════════════════════
+def reset_prosody_ipa_pipeline() -> None:
+    """Réinitialise explicitement le singleton."""
+
+    global _pipeline
+    _pipeline = None
+
+    logger.info(
+        "Pipeline Prosody+IPA réinitialisé."
+    )
+
+
+# ============================================================================
+# TESTS LOCAUX
+# ============================================================================
+
+def _run_diagnostic_tests() -> None:
+    """
+    Tests simples du pipeline.
+
+    Ces tests ne vérifient PAS la qualité acoustique du TTS.
+    Ils vérifient que les liaisons sont effectivement présentes dans
+    l'IPA produite par le pipeline.
+    """
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(levelname)s - %(name)s - %(message)s",
+    )
+
+    pipeline = ProsodyWithIPA(
+        formal_mode=True,
+        register=SpeechRegister.FORMAL,
+        strict_mode=False,
+    )
+
+    tests = [
+        "Bonjour, comment allez-vous ?",
+        "Les États-Unis d'Amérique...",
+        "« Bonjour ! » dit-elle.",
+        "Aujourd'hui, j'écoute l'histoire d'un ancien élève.",
+    ]
+
+    print()
+    print("=" * 80)
+    print("DIAGNOSTIC PROSODIE + IPA")
+    print("=" * 80)
+
+    for text in tests:
+        print()
+        print("TEXTE :", text)
+
+        result = pipeline.analyze_full(text)
+
+        print("MOTS  :", pipeline._extract_words(text))
+        print("IPA   :", result.ipa_full)
+
+        if result.warnings:
+            print("WARN  :", result.warnings)
+
+        print(
+            "STATS :",
+            f"{result.word_count} mots,",
+            f"{result.syllable_count} syllabes,",
+            f"{result.processing_time_ms:.2f} ms",
+        )
+
+    print()
+    print("=" * 80)
+    print("FIN DU DIAGNOSTIC")
+    print("=" * 80)
+
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║       Pipeline Prosodie + IPA - Tests Intégrés                   ║")
-    print("╚══════════════════════════════════════════════════════════════════╝\n")
-    
-    try:
-        pipeline = get_prosody_ipa_pipeline(
-            formal_mode=True,
-            register=SpeechRegister.FORMAL
-        )
-        
-        test_phrases = [
-            "Bonjour, comment allez-vous?",
-            "Extraordinaire, vraiment!",
-            "Depuis 1789, les progrès sont constants.",
-            "Monsieur Dupont parle français couramment.",
-        ]
-        
-        print("ANALYSES COMPLÈTES (IPA + Prosodie):\n")
-        print("=" * 80)
-        
-        for phrase in test_phrases:
-            try:
-                print(f"\n📄 Phrase: {phrase}")
-                
-                # Analyse complète
-                analysis = pipeline.analyze_full(phrase)
-                
-                print(f"   IPA: {analysis.ipa_full}")
-                print(f"   Traité: {analysis.processed_text}")
-                print(f"   Mots: {analysis.word_count}, Syllabes: {analysis.syllable_count}")
-                print(f"   Nasales: {analysis.nasal_count}, R-uvulaire: {analysis.uvular_r_count}")
-                print(f"   Temps: {analysis.processing_time_ms:.2f}ms")
-                
-                # Export SSML
-                ssml = pipeline.export_ssml(phrase)
-                print(f"   SSML: {ssml[:80]}...")
-                
-                # Export TTS
-                tts_data = pipeline.export_tts_compatible(phrase)
-                if tts_data:
-                    print(f"   Complexité: {tts_data['metadata']['complexity']}")
-                
-            except Exception as e:
-                print(f"❌ Erreur: {e}")
-        
-        print("\n" + "=" * 80)
-        print("\n✓ Tests d'intégration terminés avec succès!")
-        print("✓ Pipeline prêt pour synthèse vocale Edge-TTS.\n")
-    
-    except Exception as e:
-        print(f"❌ Erreur fatale: {e}")
-        logger.exception("Erreur dans les tests")
+    _run_diagnostic_tests()

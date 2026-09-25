@@ -22,9 +22,9 @@ except ImportError:
 
 try:
     from .french_prosody import get_french_prosody_engine, SpeechRegister
-except Exception:
-    # The bundled french_prosody.py in lue071 is currently syntactically invalid;
-    # do not let that optional fallback prevent the reader from starting.
+except (ImportError, SyntaxError) as exc:
+    # Optional module: keep startup resilient, but make the failure visible.
+    logging.warning("French prosody fallback unavailable: %s", exc, exc_info=True)
     get_french_prosody_engine = None
     SpeechRegister = None
 
@@ -129,11 +129,7 @@ class Lue:
                 logging.warning("French prosody fallback initialization failed: %s", exc, exc_info=True)
 
     def prepare_tts_text(self, text):
-        """Return TTS-ready text, preferring Phase 1 IPA+prosody when installed.
-
-        This method deliberately returns a string only; the UI never receives
-        the processed representation.
-        """
+        """Retourne le texte prêt pour le TTS, en nettoyant les balises SSML si non supportées."""
         sanitized = content_parser.sanitize_text_for_tts(text)
         if not sanitized:
             return ""
@@ -143,11 +139,15 @@ class Lue:
             try:
                 data = pipeline.export_tts_compatible(sanitized)
                 if isinstance(data, dict):
-                    # Phase 1 README documents SSML as the TTS-facing export.
-                    ssml = data.get("ssml")
-                    if isinstance(ssml, str) and ssml.strip():
-                        return ssml
-                    for key in ("tts_text", "text", "processed_text"):
+                    # Si le modèle TTS ne gère pas le SSML (ex: certains moteurs locaux/kokoro),
+                    # on privilégie le texte brut "processed_text" plutôt que le SSML avec balises.
+                    if self.tts_model and getattr(self.tts_model, "supports_ssml", False):
+                        ssml = data.get("ssml")
+                        if isinstance(ssml, str) and ssml.strip():
+                            return ssml
+                    
+                    # Fallback sur le texte nettoyé/traité sans balises XML/SSML
+                    for key in ("text_processed", "processed_text", "text"):
                         value = data.get(key)
                         if isinstance(value, str) and value.strip():
                             return value
@@ -1347,7 +1347,12 @@ class Lue:
                 await asyncio.sleep(0.05)  # Update at 20Hz
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as exc:
+                # Keep the long-lived loop alive, but never hide the root cause.
+                logging.exception(
+                    "Word update loop failed; continuing after recovery: %s",
+                    exc,
+                )
                 await asyncio.sleep(0.05)
 
     async def _shutdown(self):
@@ -1449,6 +1454,35 @@ class Lue:
                 self._save_extended_progress()
                 asyncio.create_task(ui.display_ui(self))
                 continue
+
+            # --- GESTION DE LA NAVIGATION DANS LE SOMMAIRE EN MODE 4 ---
+            if getattr(self, 'split_view_enabled', False) or config.UI_MODE == 4:
+                if len(self.chapters) > 1:
+                    if not hasattr(self, 'split_chapter_selection_idx'):
+                        self.split_chapter_selection_idx = self.chapter_idx
+
+                    # On utilise spécifiquement les commandes de changement de chapitre pour piloter le sommaire
+                    if cmd == 'prev_chapter':
+                        if self.split_chapter_selection_idx > 0:
+                            self.split_chapter_selection_idx -= 1
+                        else:
+                            self.split_chapter_selection_idx = len(self.chapters) - 1
+                        asyncio.create_task(ui.display_ui(self))
+                        continue
+
+                    elif cmd == 'next_chapter':
+                        if self.split_chapter_selection_idx < len(self.chapters) - 1:
+                            self.split_chapter_selection_idx += 1
+                        else:
+                            self.split_chapter_selection_idx = 0
+                        asyncio.create_task(ui.display_ui(self))
+                        continue
+
+                    # Validation avec la touche de pause/entrée pour basculer sur le chapitre sélectionné
+                    elif cmd == 'select_menu_item':
+                        if 0 <= self.split_chapter_selection_idx < len(self.chapters):
+                            await self._jump_to_chapter(self.split_chapter_selection_idx)
+                        continue
             # -------------------------------------------------------------
 
             if cmd == 'toggle_recent_menu':

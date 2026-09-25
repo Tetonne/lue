@@ -13,9 +13,6 @@ def _sanitize_word(word: str) -> str:
     """
     Sanitize a word by stripping all non-alphanumeric characters and converting to lowercase.
     
-    This function is used for case-insensitive word comparison by removing punctuation
-    and other special characters, leaving only letters and numbers.
-    
     Args:
         word: The word to sanitize
         
@@ -25,17 +22,12 @@ def _sanitize_word(word: str) -> str:
     if not word:
         return ""
     
-    # Strip all non-alphanumeric characters and convert to lowercase
     return re.sub(r'[^a-zA-Z0-9]', '', word).lower()
 
 
-def _get_highlightable_words(text: str) -> list[str]:
+def _get_highlightable_words(text: str) -> List[str]:
     """
     Get list of words that should be considered for timing.
-    
-    This function filters out tokens that contain only punctuation/non-alphanumeric
-    characters, which should not be counted as words for timing purposes.
-    Strips punctuation (including commas from em dash replacement) for counting.
     
     Args:
         text: The text to process
@@ -46,7 +38,6 @@ def _get_highlightable_words(text: str) -> list[str]:
     if not text:
         return []
         
-    # Split on whitespace to get tokens and filter efficiently
     words = []
     for token in text.split():
         cleaned = token.strip(string.punctuation)
@@ -60,9 +51,6 @@ def _get_highlightable_words(text: str) -> list[str]:
 def _extract_core_word(token: str) -> str:
     """
     Extract the core word from a token by removing surrounding punctuation.
-    
-    This function is more robust than simple strip() as it handles nested
-    punctuation and preserves internal punctuation like contractions.
     
     Args:
         token: The token to process
@@ -87,13 +75,6 @@ def _extract_core_word(token: str) -> str:
 def create_word_mapping(original_words: List[str], tts_word_timings: List[Tuple[str, float, float]]) -> Optional[List[int]]:
     """
     Create a mapping from original word indices to TTS word timing indices.
-    This handles cases where TTS combines words or processes punctuation differently.
-    
-    Uses sanitized word comparison with fuzzy matching to handle:
-    - Punctuation differences between original and TTS text
-    - Case differences
-    - Word combining/splitting by TTS engines
-    - Punctuation-only tokens
     
     Args:
         original_words: List of words from the original text
@@ -126,7 +107,6 @@ def create_word_mapping(original_words: List[str], tts_word_timings: List[Tuple[
         if tts_index >= tts_len:
             last_tts_index = max(0, tts_len - 1)
             mapping.append(last_tts_index)
-            logging.debug(f"create_word_mapping: Word {orig_index} '{orig_word}' -> TTS {last_tts_index} (exhausted TTS words)")
             continue
         
         orig_sanitized_word = orig_sanitized[orig_index]
@@ -134,7 +114,6 @@ def create_word_mapping(original_words: List[str], tts_word_timings: List[Tuple[
         if not orig_sanitized_word:
             prev_mapping = mapping[-1] if mapping else 0
             mapping.append(prev_mapping)
-            logging.debug(f"create_word_mapping: Word {orig_index} '{orig_word}' (punctuation-only) -> TTS {prev_mapping}")
             continue
         
         best_match_index = None
@@ -164,30 +143,19 @@ def create_word_mapping(original_words: List[str], tts_word_timings: List[Tuple[
         
         if best_match_index is None or best_match_score == 0:
             mapping.append(tts_index)
-            logging.debug(f"create_word_mapping: Word {orig_index} '{orig_word}' -> TTS {tts_index} (no match, fallback)")
             tts_index += 1
         else:
             mapping.append(best_match_index)
-            logging.debug(f"create_word_mapping: Word {orig_index} '{orig_word}' -> TTS {best_match_index} '{tts_words[best_match_index]}' (score={best_match_score})")
             if best_match_index <= tts_index + 2:
                 tts_index = best_match_index + 1
-    
-    if len(original_words) != tts_len:
-        logging.debug(f"create_word_mapping: Word count mismatch - {len(original_words)} original vs {tts_len} TTS")
     
     return mapping
 
 
+@lru_cache(maxsize=256)
 def _words_similar(word1: str, word2: str) -> bool:
     """
-    Check if two words are similar (for handling slight differences in tokenization).
-    
-    Args:
-        word1: First word to compare
-        word2: Second word to compare
-        
-    Returns:
-        True if words are similar, False otherwise
+    Check if two words are similar (cached for performance).
     """
     if not word1 or not word2:
         return False
@@ -205,13 +173,7 @@ def _words_similar(word1: str, word2: str) -> bool:
 
 def adjust_word_timings_for_continuity(word_timings: List[Tuple[str, float, float]]) -> List[Tuple[str, float, float]]:
     """
-    Adjust word timings to ensure continuity and handle timing inconsistencies.
-    
-    Args:
-        word_timings: List of (word, start_time, end_time) tuples
-        
-    Returns:
-        Adjusted list of (word, start_time, end_time) tuples
+    Adjust word timings to ensure continuity and handle timing inconsistencies safely.
     """
     if len(word_timings) <= 1:
         return word_timings
@@ -255,31 +217,18 @@ def adjust_word_timings_for_continuity(word_timings: List[Tuple[str, float, floa
 
 def calculate_speech_duration(word_timings: List[Tuple[str, float, float]]) -> float:
     """
-    Calculate the total speech duration from word timings.
-    
-    Args:
-        word_timings: List of (word, start_time, end_time) tuples
-        
-    Returns:
-        Speech duration in seconds
+    Calculate the total speech duration from word timings safely.
     """
     if not word_timings:
         return 0.0
     
-    return max((end for _, _, end in word_timings if end is not None), default=0.0)
+    valid_ends = [end for _, _, end in word_timings if end is not None]
+    return max(valid_ends, default=0.0)
 
 
 def estimate_word_timings_from_duration(text: str, total_duration: float) -> List[Tuple[str, float, float]]:
     """
     Estimate word timings based on word count and total duration.
-    This is a fallback when TTS doesn't provide precise timing information.
-    
-    Args:
-        text: The text that was spoken
-        total_duration: Total duration of the audio in seconds
-        
-    Returns:
-        List of (word, start_time, end_time) tuples
     """
     words = _get_highlightable_words(text)
     if not words:
@@ -299,20 +248,7 @@ def process_tts_timing_data(
     total_duration: Optional[float] = None
 ) -> Dict[str, Any]:
     """
-    Process raw timing data from TTS into a standardized format with all necessary
-    calculations and adjustments applied.
-    
-    Args:
-        original_text: The original text that was spoken
-        raw_word_timings: Raw word timings from TTS engine
-        total_duration: Total audio duration (optional, will be calculated if not provided)
-        
-    Returns:
-        Dictionary containing:
-        - word_timings: Adjusted word timings
-        - speech_duration: Duration of speech content
-        - total_duration: Total audio duration
-        - word_mapping: Mapping from original words to TTS timings
+    Process raw timing data from TTS into a standardized format.
     """
     try:
         if not raw_word_timings:
@@ -329,11 +265,6 @@ def process_tts_timing_data(
         
         original_words = _get_highlightable_words(original_text)
         word_mapping = create_word_mapping(original_words, word_timings)
-        
-        if word_mapping:
-            logging.debug(f"Created word mapping: {len(original_words)} original words -> {len(word_timings)} TTS timings")
-            if len(original_words) != len(word_timings):
-                logging.debug(f"Word count mismatch - Original: {original_words}, TTS: {[w for w, _, _ in word_timings]}")
         
         final_total_duration = total_duration if total_duration is not None else speech_duration
         
@@ -361,12 +292,6 @@ def process_tts_timing_data(
 def validate_timing_data(timing_data: Dict[str, Any]) -> bool:
     """
     Validate that timing data contains all required fields and is properly formatted.
-    
-    Args:
-        timing_data: Dictionary containing timing information
-        
-    Returns:
-        True if valid, False otherwise
     """
     if not isinstance(timing_data, dict):
         return False

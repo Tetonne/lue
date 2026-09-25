@@ -131,9 +131,11 @@ class FrenchProsodyEngineAdvanced:
         self, 
         formal_mode: bool = True, 
         register: SpeechRegister = SpeechRegister.STANDARD,
-        enable_logging: bool = True,
+        target_engine: str = "edge",  # "edge", "kokoro", "generic"
+        enable_logging: bool = True,  # <--- AJOUTER CET ARGUMENT ICI
         strict_mode: bool = False
     ):
+        self.target_engine = target_engine.lower()
         """
         Initialise le moteur avec règles françaises académiques enrichies.
         
@@ -646,32 +648,19 @@ class FrenchProsodyEngineAdvanced:
             return text
     
     def apply_liaison_rules(self, text: str) -> str:
-        """Applique règles de liaison."""
+        """Applique règles de liaison de manière propre sans injecter de caractères parasites."""
         try:
             if not text:
                 return text
             
+            # Neutraliser les liaisons interdites (ex: et + voyelle -> pas de liaison)
             for pattern, replacement in self.forbidden_liaisons.items():
                 compiled = self._get_compiled_pattern(pattern)
                 if compiled:
                     text = compiled.sub(replacement, text)
             
-            for pattern, replacement in self.mandatory_liaisons.items():
-                compiled = self._get_compiled_pattern(pattern)
-                if compiled:
-                    text = compiled.sub(replacement, text)
-            
-            disjunction_words = '|'.join(re.escape(w) for w in self.disjunction_words)
-            pattern = rf'\b(les|des|un|le|la|du)\s+({disjunction_words})\b'
-            compiled = self._get_compiled_pattern(pattern)
-            if compiled:
-                text = compiled.sub(r'\1 // \2', text)
-            
-            if self.formal_mode:
-                for pattern, replacement in self.optional_liaisons.items():
-                    compiled = self._get_compiled_pattern(pattern)
-                    if compiled:
-                        text = compiled.sub(replacement, text)
+            # Ne pas appliquer de regex de substitution globale agressive sur les mots composés 
+            # comme "États-Unis" pour éviter la création de tokens parasites ("AD", etc.).
             
             return text
         except Exception as e:
@@ -905,7 +894,7 @@ class FrenchProsodyEngineAdvanced:
     # ════════════════════════════════════════════════════════════════════════
 
     def preprocess_text(self, text: str) -> str:
-        """Pipeline complet de prétraitement robuste."""
+        """Pipeline complet de prétraitement robuste et adaptatif selon le moteur TTS."""
         try:
             is_valid, error = self._validate_input(text)
             if not is_valid:
@@ -914,45 +903,54 @@ class FrenchProsodyEngineAdvanced:
             
             original_text = text
             
+            # Nettoyage des balises internes spécifiques si présentes
             text = re.sub(r'[\.\s]*__\s*[hH]\s*\d+\s*__[\.\s]*', ' ', text, flags=re.IGNORECASE)
 
+            # Normalisation typographique de base (commune à tous les moteurs)
             text = text.replace('\u00a0', ' ').replace("'", "'").replace('ʼ', "'")
             text = re.sub(r'…|\.{3,}', '...', text)
             text = text.replace('—', ', ').replace('–', ', ')
             text = text.replace('„', '"').replace('"', '"')
             
+            # Normalisation textuelle structurante (indispensable pour éviter la lecture littérale)
             text = self.convert_dates(text)
             text = self.convert_times(text)
             text = self.convert_roman_numerals(text)
             text = self.convert_years(text)
             text = self.normalize_abbreviations(text)
-            
-            text = self.apply_heterophone_corrections(text)
-            text = self.apply_phonetic_traps(text)
-            text = self.apply_elision_rules(text)
-            
-            text = self.apply_liaison_rules(text)
-            text = self.apply_schwa_and_reduction(text)
-            
             text = self.convert_latin_expressions(text)
             text = self.process_interjections_and_incises(text)
             
-            text = re.sub(r'[\.\s]*__\s*[hH]\s*\d+\s*__[\.\s]*', ' ', text, flags=re.IGNORECASE)
+            # Rôles adaptatifs selon le moteur cible (Edge vs Kokoro/Local)
+            if self.target_engine == "edge":
+                # Pour Edge-TTS : On évite les réécritures phonétiques agressives 
+                # qui risquent d'engendrer des artefacts textuels.
+                pass
+                
+            elif self.target_engine in ["kokoro", "local", "phonetic"]:
+                # Pour Kokoro ou moteurs locaux : On applique les dictionnaires d'aide 
+                # (homographes hétérophones et pièges phonétiques complexes)
+                text = self.apply_heterophone_corrections(text)
+                text = self.apply_phonetic_traps(text)
+                text = self.apply_elision_rules(text)
+                text = self.apply_schwa_and_reduction(text)
             
+            # Nettoyage final de la ponctuation et des espaces superflus
+            text = re.sub(r'[\.\s]*__\s*[hH]\s*\d+\s*__[\.\s]*', ' ', text, flags=re.IGNORECASE)
             text = re.sub(r'\s+,', ',', text)
             text = re.sub(r'(\S)([!?])', r'\1 \2', text)
             text = re.sub(r'(\S):', r'\1 :', text)
             text = re.sub(r'(\S);', r'\1 ;', text)
             text = re.sub(r'\s{2,}', ' ', text).strip()
             
-            logger.debug(f"Texte prétraité: '{original_text[:50]}...' → '{text[:50]}...'")
+            logger.debug(f"Texte prétraité [{self.target_engine}]: '{original_text[:50]}...' → '{text[:50]}...'")
             return text
         
         except Exception as e:
             logger.error(f"Erreur prétraitement: {e}")
             if self.strict_mode:
                 raise
-            return ""
+            return text
 
     def enhance_sentence_for_tts(self, sentence: str, tts_engine: str = "edge") -> str:
         """Améliore phrase pour TTS."""
@@ -1018,6 +1016,8 @@ _french_prosody_engine: Optional[FrenchProsodyEngineAdvanced] = None
 def get_french_prosody_engine(
     formal_mode: bool = True,
     register: SpeechRegister = SpeechRegister.STANDARD,
+    target_engine: str = "edge",
+    enable_logging: bool = True,
     strict_mode: bool = False
 ) -> FrenchProsodyEngineAdvanced:
     """Obtient le moteur de prosodie (singleton)."""
@@ -1028,6 +1028,8 @@ def get_french_prosody_engine(
             _french_prosody_engine = FrenchProsodyEngineAdvanced(
                 formal_mode=formal_mode,
                 register=register,
+                target_engine=target_engine,
+                enable_logging=enable_logging,
                 strict_mode=strict_mode
             )
         return _french_prosody_engine

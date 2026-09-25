@@ -490,35 +490,40 @@ class FrenchIPAPhoneticizer:
         return self.LIAISON_MAP_EXTENDED.get(word_normalized)
 
     def link_words(self, words: list[str], analyses: list[str]) -> list[str]:
-        """Applique les liaisons/enchaînements aux IPA unitaires."""
+        """Applique les liaisons/enchaînements aux IPA unitaires de manière sécurisée."""
         if not words or not analyses or len(words) != len(analyses):
             return analyses
 
         linked = list(analyses)
 
         for i in range(len(words) - 1):
-            current = words[i].lower().strip(".,!?;:«»\"'()[]")
+            current_raw = words[i]
+            current = current_raw.lower().strip(".,!?;:«»\"'()[]")
             current_for_liaison = current.split("'")[-1]
             next_word = words[i + 1].lower().strip(".,!?;:«»\"'()[]")
 
             if not current or not next_word:
                 continue
 
-            # 1. Formes avec trait d'union
-            if "-" in words[i]:
-                linked[i] = self._handle_hyphenated(words[i], linked[i], next_word)
+            # 1. Ignorer les mots avec trait d'union gérés séparément ou les mots interdits
+            if "-" in current_raw:
+                linked[i] = self._handle_hyphenated(current_raw, linked[i], next_word)
                 continue
 
-            # 2. Pas de liaison après les mots interdits
             if current in self.FORBIDDEN_LIAISON_AFTER:
                 continue
 
-            # 3. Le mot suivant doit commencer par un son vocalique
+            # 2. Le mot suivant doit impérativement commencer par une voyelle ou un h muet
             if not self._starts_with_vowel(next_word):
                 continue
 
-            # 4. Liaison lexicale connue
-            consonant = self.LIAISON_MAP_EXTENDED.get(current_for_liaison) or self.LIAISON_MAP.get(current_for_liaison)
+            # 3. Recherche prioritaire dans la table de liaison exacte
+            consonant = self.LIAISON_MAP_EXTENDED.get(current_for_liaison)
+            
+            # Si non trouvé, fallback sur la table standard, sinon pas de liaison sauvage
+            if not consonant:
+                consonant = self.LIAISON_MAP.get(current_for_liaison)
+
             if consonant:
                 linked[i] = self._append_linked_consonant(linked[i], consonant)
 
@@ -536,7 +541,12 @@ class FrenchIPAPhoneticizer:
         if word.startswith("h"):
             return len(word) > 1 and word[1] in self.VOWELS
 
-        return word[0] in self.VOWELS
+        # Nettoyage des accents pour la vérification de la voyelle initiale (ex: é -> e)
+        normalized_first_char = word[0]
+        if normalized_first_char in 'éèêëàâäîïôöùûüç':
+            return True
+
+        return normalized_first_char in self.VOWELS
 
     def _append_linked_consonant(self, ipa: str, consonant: str) -> str:
         """Ajoute une consonne de liaison sans casser l'IPA existante."""
